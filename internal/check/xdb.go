@@ -99,7 +99,9 @@ func (e *Engine) checkCrossDB(ctx context.Context, a *advisoryCtx) {
 						mine.Name, joinInts(ms), og.Name, al.ID)
 				} else if strings.HasPrefix(mine.Name, og.Name+"/") || strings.HasPrefix(og.Name, mine.Name+"/") {
 					continue // package path vs. its module path
-				} else if similarName(mine.Name, og.Name) {
+				} else if similarName(mine.Name, og.Name) && (mine.Pkg == nil || !hasGroup(a.groups, og)) {
+					// When this advisory also lists og's package, a similar
+					// name is only suspicious if it does not exist.
 					msg = fmt.Sprintf("%s does not list %s but lists the similarly named %s", al.ID, mine.Name, og.Name)
 				} else {
 					continue
@@ -250,4 +252,13 @@ func joinInts(ns []int) string {
 		s = append(s, strconv.Itoa(n))
 	}
 	return strings.Join(s, ", ")
+}
+
+func hasGroup(gs []*group, og *group) bool {
+	for _, g := range gs {
+		if g.key() == og.key() {
+			return true
+		}
+	}
+	return false
 }

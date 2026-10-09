@@ -32,7 +32,7 @@ func TestIntegration(t *testing.T) {
 			file: "GHSA-w7c2-w76w-5hmj.json",
 			code: 1,
 			wants: []want{
-				{check.PKG001, check.Error, []string{"github.com/cilium/ciliumCilium does not exist"}},
+				{check.PKG001, check.Error, []string{"github.com/cilium/ciliumCilium was not found"}},
 				{check.XDB001, check.Warning, []string{"GO-2026-6596", "github.com/cilium/ciliumCilium"}},
 			},
 		},

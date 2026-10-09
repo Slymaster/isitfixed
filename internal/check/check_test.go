@@ -49,7 +49,7 @@ func TestPKG001(t *testing.T) {
 	v := vuln("GHSA-test", versions.Go, "github.com/cilium/cilium", rng("i=0", "f=1.17.17"))
 	v.Affected = append(v.Affected, vuln("", versions.Go, "github.com/cilium/ciliumCilium", rng("i=1.18.0", "f=1.18.11")).Affected...)
 	fs := engine(reg).Run(ctx, v)
-	expectOne(t, fs, PKG001, Error, "github.com/cilium/ciliumCilium does not exist", "did you mean github.com/cilium/cilium")
+	expectOne(t, fs, PKG001, Error, "github.com/cilium/ciliumCilium was not found", "did you mean github.com/cilium/cilium")
 	if n := len(only(fs, PKG001)); n != 1 {
 		t.Errorf("want only the misspelled package flagged, got %d PKG001 findings", n)
 	}
@@ -414,7 +414,7 @@ func TestFIX001PrereleasesOfFixedVersion(t *testing.T) {
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	fs := e.Run(ctx, fixVuln(rng("i=0", "f=1.25.0")))
-	expectOne(t, fs, FIX001, Info, "pre-release 1.25.0-rc1")
+	expectOne(t, fs, FIX001, Info, "pre-release 1.25.0-rc1 and later pre-releases")
 	for _, f := range fs {
 		if f.Severity != Info {
 			t.Errorf("unexpected: %s", dump([]Finding{f}))
@@ -456,6 +456,21 @@ func TestRNG002MidLineIntroductions(t *testing.T) {
 	for _, f := range only(fs, RNG002) {
 		if f.Severity != Info {
 			t.Errorf("ranges introduced mid-line: gaps are info only: %s", dump([]Finding{f}))
+		}
+	}
+}
+
+func TestFIX001LinesPresentFromRangeStart(t *testing.T) {
+	// The "fix" lines are present from the introduced version on: the
+	// referenced commit is the one that added the feature, not the fix.
+	reg := goFixRegistry(seq("1.0.", 0, 5), seq("1.0.", 0, 5)...)
+	e := engine(reg)
+	e.GitHub = fixGitHub()
+	fs := e.Run(ctx, fixVuln(rng("i=1.0.0", "f=1.0.5")))
+	expectOne(t, fs, FIX001, Info, "present from 1.0.0, the first version the range covers")
+	for _, f := range fs {
+		if f.Severity != Info {
+			t.Errorf("unexpected: %s", dump([]Finding{f}))
 		}
 	}
 }

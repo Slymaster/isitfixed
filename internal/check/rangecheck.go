@@ -186,6 +186,9 @@ func (e *Engine) rangeCandidates(ctx context.Context, a *advisoryCtx, g *group) 
 		if slicesAny(l.releases, g.covered) {
 			continue
 		}
+		if !slicesAny(l.releases, func(v string) bool { return !versions.IsPrerelease(g.Eco, v) }) {
+			continue // a line of pre-releases only
+		}
 		before, end := endsBefore(g, l.first())
 		after, next := startsAfter(g, l.last())
 		// Go pseudo-versions order before every tagged release, so a range

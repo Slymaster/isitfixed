@@ -346,6 +346,14 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 				pre = append(pre, fmt.Sprintf("%s.x: pre-release %s and later pre-releases already contain the fix", l.key, e))
 				continue
 			}
+			// Present from the very first version the range covers: the
+			// referenced commit is more likely the one that introduced the
+			// vulnerable feature (advisories often link it) than the fix.
+			if e == firstCovered(g, iv) {
+				pre = append(pre, fmt.Sprintf("%s.x: the referenced lines are present from %s, the first version the range covers; a referenced commit may be the one that introduced the vulnerability rather than the fix (%s)",
+					l.key, e, r.summary()))
+				continue
+			}
 			earliest[l.key] = e
 			bad = append([]string{fmt.Sprintf("%s.x: the fix first appears in %s (newest affected version checked: %s)", l.key, e, r.summary())}, bad...)
 			ev = append(ev, r.evidence())
@@ -354,7 +362,7 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 			}
 		}
 		if len(pre) > 0 {
-			info(fmt.Sprintf("range %s marks pre-releases affected that already contain the fix", describe(iv)), pre...)
+			info(fmt.Sprintf("range %s: some affected versions contain the referenced lines, but not in a way that shows the range is wrong", describe(iv)), pre...)
 		}
 		// 3. An unpublished fixed version: find the real one in its line.
 		fixedLine := ""
@@ -532,4 +540,14 @@ func sample(label string, lines []string) []string {
 		out = append(out, label+": "+l)
 	}
 	return out
+}
+
+// firstCovered returns the lowest published version inside the interval.
+func firstCovered(g *group, iv interval) string {
+	for _, r := range g.Pkg.Releases {
+		if iv.contains(g.Eco, r.Version) {
+			return r.Version
+		}
+	}
+	return ""
 }

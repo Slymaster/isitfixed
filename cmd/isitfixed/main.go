@@ -14,6 +14,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Slymaster/isitfixed/internal/check"
 	"github.com/Slymaster/isitfixed/internal/github"
@@ -232,12 +233,21 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	sem := make(chan struct{}, n)
 	var wg sync.WaitGroup
+	// Progress on an interactive terminal for long directory scans.
+	var done atomic.Int32
+	progress := func() {}
+	interactive := false
+	if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 && len(jobs) > 10 && stderr == os.Stderr {
+		interactive = true
+		progress = func() { fmt.Fprintf(stderr, "\rchecked %d/%d", done.Add(1), len(jobs)) }
+	}
 	for i, j := range jobs {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
+			defer progress()
 			var v *osv.Vuln
 			var err error
 			src := j.id
@@ -274,6 +284,9 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		}()
 	}
 	wg.Wait()
+	if interactive {
+		fmt.Fprintln(stderr)
+	}
 
 	var out []report.Advisory
 	failed := false

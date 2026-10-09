@@ -14,13 +14,14 @@ import (
 
 // DefaultMavenRepos are searched in order. GitHub advisories in the Maven
 // ecosystem also cover artifacts that are not on Maven Central: Jenkins
-// plugins, Android libraries, XWiki and Atlassian artifacts.
+// plugins, Android libraries, XWiki, Atlassian and OSGeo (GeoServer) artifacts.
 var DefaultMavenRepos = []string{
 	"https://repo1.maven.org/maven2",
 	"https://repo.jenkins-ci.org/releases",
 	"https://maven.google.com",
 	"https://maven.xwiki.org/releases",
 	"https://packages.atlassian.com/maven-public",
+	"https://repo.osgeo.org/repository/release",
 }
 
 // Maven reads Maven repositories.

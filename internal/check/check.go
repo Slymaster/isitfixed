@@ -326,7 +326,7 @@ func (e *Engine) checkPackage(ctx context.Context, a *advisoryCtx, g *group) {
 		return
 	}
 	f := Finding{Check: PKG001, Severity: Error, Ecosystem: g.Eco, Package: g.Name,
-		Message:  fmt.Sprintf("package %s does not exist in the %s registry", g.Name, registryName(g)),
+		Message:  fmt.Sprintf("package %s was not found on %s", g.Name, registryName(g)),
 		Evidence: []string{g.Reg.PackageURL(g.Name)}}
 	for _, o := range a.groups {
 		if o != g && o.Eco == g.Eco && similarName(o.Name, g.Name) {
@@ -373,11 +373,11 @@ func levenshtein(a, b string) int {
 func registryName(g *group) string {
 	switch r := g.Reg.(type) {
 	case *registry.Maven:
-		return "Maven (" + strings.Join(r.RepoNames(), ", ") + ")"
+		return strings.Join(r.RepoNames(), ", ")
 	case *registry.GoProxy:
-		return "Go module proxy"
+		return "proxy.golang.org"
 	case *registry.Npm:
-		return "npm"
+		return "registry.npmjs.org"
 	case *registry.Crates:
 		return "crates.io"
 	}
