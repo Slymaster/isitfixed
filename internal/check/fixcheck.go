@@ -58,6 +58,8 @@ type prober struct {
 	seen    map[string]bool
 	budget  int
 	lowConf bool
+	// groupSeen[i]: commit group i was applicable to some inspected artifact.
+	groupSeen []bool
 }
 
 // probe inspects one published version (exact release string). It returns
@@ -76,6 +78,12 @@ func (p *prober) probe(v string) *probeRes {
 		r.res = fix.Match(p.sets, r.art, p.seen)
 		if r.res.LowConf {
 			p.lowConf = true
+		}
+		if p.groupSeen == nil {
+			p.groupSeen = make([]bool, len(r.res.GroupApplicable))
+		}
+		for i, ok := range r.res.GroupApplicable {
+			p.groupSeen[i] = p.groupSeen[i] || ok
 		}
 	} else {
 		r.res.Status = fix.Inapplicable
@@ -191,6 +199,8 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 		}
 		sets = append(sets, s)
 	}
+	sets, dropped := fix.Superseded(sets)
+	notes = append(notes, dropped...)
 	if len(sets) == 0 {
 		info("unverifiable: the referenced fix commits yield no distinctive source lines to look for", notes...)
 		return
@@ -305,7 +315,7 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 			}
 		}
 		// 2. Affected versions must not contain the fix.
-		var bad []string
+		var bad, pre []string
 		var ev []string
 		for i := len(pl.covLines) - 1; i >= 0 && i >= len(pl.covLines)-3; i-- {
 			l := pl.covLines[i]
@@ -324,12 +334,27 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 				}
 			}
 			e := p.bisect(cands)
+			// Pre-releases of an upcoming fixed release that already carry
+			// the fix are expected; report them as info only.
+			allPre := true
+			for _, v := range cands {
+				if versions.Compare(g.Eco, v, e) >= 0 && !versions.IsPrerelease(g.Eco, v) {
+					allPre = false
+				}
+			}
+			if allPre {
+				pre = append(pre, fmt.Sprintf("%s.x: pre-release %s and later pre-releases already contain the fix", l.key, e))
+				continue
+			}
 			earliest[l.key] = e
 			bad = append([]string{fmt.Sprintf("%s.x: the fix first appears in %s (newest affected version checked: %s)", l.key, e, r.summary())}, bad...)
 			ev = append(ev, r.evidence())
 			if er := p.results[e]; er != nil && er != r {
 				ev = append(ev, er.evidence())
 			}
+		}
+		if len(pre) > 0 {
+			info(fmt.Sprintf("range %s marks pre-releases affected that already contain the fix", describe(iv)), pre...)
 		}
 		// 3. An unpublished fixed version: find the real one in its line.
 		fixedLine := ""
@@ -362,6 +387,33 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 	if p.lowConf {
 		conf = "low"
 	}
+	// A fix made of several separate commits, some of which change only
+	// files this package does not ship (another module of the project), can
+	// only be partly verified here: presence of the visible part does not
+	// prove the version is fixed.
+	outside := 0
+	for _, ok := range p.groupSeen {
+		if !ok {
+			outside++
+		}
+	}
+	if outside > 0 {
+		note := fmt.Sprintf("%d of the %d referenced fix commit groups change only files outside this package's artifacts, so only part of the fix could be checked",
+			outside, len(p.groupSeen))
+		for i := range a.findings {
+			f := &a.findings[i]
+			if f.Check == FIX001 && f.Package == g.Name && f.Severity == Warning {
+				f.Severity = Info
+				f.Details = append(f.Details, note)
+				f.Suggested = nil
+			}
+		}
+		for _, c := range a.rng {
+			if c.g == g {
+				c.partialFix = true
+			}
+		}
+	}
 	// Feed evidence to range-shape candidates of this package.
 	for _, c := range a.rng {
 		if c.g != g {
@@ -374,6 +426,9 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 		r := p.probe(v)
 		if r == nil || r.err != nil || (r.res.Status != fix.Contains && r.res.Status != fix.Lacks) {
 			continue
+		}
+		if c.partialFix && r.res.Status == fix.Contains {
+			continue // a partial fix present proves nothing
 		}
 		c.probed, c.result, c.artURL = true, r.res, r.evidence()
 		if r.res.Status == fix.Contains && len(c.uncovered) > 0 {

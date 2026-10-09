@@ -13,12 +13,14 @@ import (
 )
 
 // DefaultMavenRepos are searched in order. GitHub advisories in the Maven
-// ecosystem also cover Jenkins plugins (repo.jenkins-ci.org) and Android
-// libraries (maven.google.com), which are not on Maven Central.
+// ecosystem also cover artifacts that are not on Maven Central: Jenkins
+// plugins, Android libraries, XWiki and Atlassian artifacts.
 var DefaultMavenRepos = []string{
 	"https://repo1.maven.org/maven2",
 	"https://repo.jenkins-ci.org/releases",
 	"https://maven.google.com",
+	"https://maven.xwiki.org/releases",
+	"https://packages.atlassian.com/maven-public",
 }
 
 // Maven reads Maven repositories.
@@ -189,4 +191,15 @@ func (m *Maven) PackageURL(name string) string {
 		return ""
 	}
 	return gaPath(m.repos()[0], g, a) + "/maven-metadata.xml"
+}
+
+// RepoNames lists the repositories searched, by host.
+func (m *Maven) RepoNames() []string {
+	var out []string
+	for _, r := range m.repos() {
+		h := strings.TrimPrefix(strings.TrimPrefix(r, "https://"), "http://")
+		h, _, _ = strings.Cut(h, "/")
+		out = append(out, h)
+	}
+	return out
 }

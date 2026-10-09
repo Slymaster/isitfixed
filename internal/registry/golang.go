@@ -198,3 +198,33 @@ func (g *GoProxy) Artifact(ctx context.Context, name, version string) (*Artifact
 
 // PackageURL implements Registry.
 func (g *GoProxy) PackageURL(name string) string { return g.modURL(name) + "list" }
+
+// ExactVersion reports whether module mod itself (not a parent module)
+// serves version v.
+func (g *GoProxy) ExactVersion(ctx context.Context, mod, v string) bool {
+	_, err := g.HTTP.Get(ctx, httpx.Request{URL: g.modURL(mod) + "v" + versions.Normalize(versions.Go, v) + ".info", Immutable: true})
+	return err == nil
+}
+
+// Origin returns the VCS repository URL and subdirectory of a module, as
+// recorded by the proxy for its latest version.
+func (g *GoProxy) Origin(ctx context.Context, name string) (repoURL, subdir string) {
+	mod, _, err := g.Module(ctx, name)
+	if err != nil {
+		return "", ""
+	}
+	resp, err := g.HTTP.Get(ctx, httpx.Request{URL: g.base() + "/" + EscapePath(mod) + "/@latest"})
+	if err != nil {
+		return "", ""
+	}
+	var gi struct {
+		Origin struct {
+			URL    string
+			Subdir string
+		}
+	}
+	if json.Unmarshal(resp.Body, &gi) != nil {
+		return "", ""
+	}
+	return gi.Origin.URL, gi.Origin.Subdir
+}

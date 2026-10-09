@@ -10,6 +10,7 @@ import (
 
 	"github.com/Slymaster/isitfixed/internal/github"
 	"github.com/Slymaster/isitfixed/internal/osv"
+	"github.com/Slymaster/isitfixed/internal/registry"
 	"github.com/Slymaster/isitfixed/internal/versions"
 )
 
@@ -312,5 +313,149 @@ func TestSkipsMalwareAndWithdrawn(t *testing.T) {
 	v.Withdrawn = "2024-01-01T00:00:00Z"
 	if fs := engine(reg).Run(ctx, v); len(fs) != 0 {
 		t.Errorf("withdrawn advisory: %s", dump(fs))
+	}
+}
+
+func TestVER001GoModulePaths(t *testing.T) {
+	base := &fakeRegistry{eco: versions.Go, pkgs: map[string][]string{
+		"github.com/pion/dtls":            {"1.5.4"},
+		"github.com/portainer/portainer":  {"0.10.1"},
+		"github.com/argoproj/argo-cd/v2":  {"2.0.0"},
+		"github.com/example/missing-vers": {"1.0.0"},
+	}}
+	reg := &fakeGoRegistry{fakeRegistry: base, modules: map[string][]string{
+		"github.com/pion/dtls/v2":     {"2.1.4"},
+		"github.com/argoproj/argo-cd": {"1.7.13"},
+	}}
+	e := &Engine{Registries: map[string]registry.Registry{versions.Go: reg},
+		GitHub: &fakeTags{tags: map[string][]string{"portainer/portainer": {"2.33.8", "v2.33.7"}}}}
+
+	// Major version 2 published under the /v2 module path: actionable.
+	fs := e.Run(ctx, vuln("GHSA-a", versions.Go, "github.com/pion/dtls", rng("i=0", "f=2.1.4")))
+	expectOne(t, fs, VER001, Error, "2.1.4 is not a version of module github.com/pion/dtls; it is published under module github.com/pion/dtls/v2")
+	// v1 versions under a /v2 module path.
+	fs = e.Run(ctx, vuln("GHSA-b", versions.Go, "github.com/argoproj/argo-cd/v2", rng("i=0", "f=1.7.13")))
+	expectOne(t, fs, VER001, Error, "published under module github.com/argoproj/argo-cd")
+	// A git tag that cannot be a module version: GHSA convention, info only.
+	fs = e.Run(ctx, vuln("GHSA-c", versions.Go, "github.com/portainer/portainer", rng("i=2.33.0", "f=2.33.8")))
+	expectOne(t, fs, VER001, Info, "fixed version 2.33.8 is a git tag of github.com/portainer/portainer")
+	expectOne(t, fs, VER001, Warning, "introduced version 2.33.0 is not published")
+	// Neither: error stands.
+	fs = e.Run(ctx, vuln("GHSA-d", versions.Go, "github.com/example/missing-vers", rng("i=0", "f=1.0.1")))
+	expectOne(t, fs, VER001, Error, "fixed version 1.0.1 is not published")
+}
+
+func TestVER001IntroducedZeroSpellings(t *testing.T) {
+	reg := &fakeRegistry{eco: versions.Npm, pkgs: map[string][]string{"gnuplot": {"0.1.0", "0.2.0"}}}
+	fs := engine(reg).Run(ctx, vuln("GHSA-z", versions.Npm, "gnuplot", rng("i=0.0.0", "f=0.2.0")))
+	if got := only(fs, VER001); len(got) != 0 {
+		t.Errorf("introduced 0.0.0 means 0:\n%s", dump(got))
+	}
+}
+
+func TestXDB001ModulePathRules(t *testing.T) {
+	reg := &fakeRegistry{eco: versions.Go, pkgs: map[string][]string{
+		"github.com/prebid/prebid-server/v3": {"3.29.0", "3.30.0"},
+		"golang.org/x/net/http2":             {"0.1.0"},
+	}}
+	e := engine(reg)
+	goRec := vuln("GO-1", versions.Go, "github.com/prebid/prebid-server/v4", rng("i=0", "f=4.4.0"))
+	goRec.Affected = append(goRec.Affected, vuln("", versions.Go, "golang.org/x/net", rng("i=0", "f=0.2.0")).Affected...)
+	e.OSV = fakeOSV{"GO-1": goRec}
+	v := vuln("GHSA-p", versions.Go, "github.com/prebid/prebid-server/v3", rng("i=0", "la=3.30.0"))
+	v.Affected = append(v.Affected, vuln("", versions.Go, "golang.org/x/net/http2", rng("i=0", "f=0.2.0")).Affected...)
+	v.Aliases = []string{"GO-1"}
+	if fs := only(e.Run(ctx, v), XDB001); len(fs) != 0 {
+		t.Errorf("a different major-version module and a package-vs-module path are not typos:\n%s", dump(fs))
+	}
+}
+
+func TestFIX001PartialFixAcrossModules(t *testing.T) {
+	// Two separate fix commits; the second changes only another module of
+	// the project. The visible half being present in a range version must
+	// not produce a warning.
+	vs := seq("14.10.", 0, 6)
+	reg := goFixRegistry(vs, "14.10.5", "14.10.6")
+	gh := fixGitHub()
+	other := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	gh.commits[other] = &github.Commit{Repo: "o/r", SHA: other, Parent: "p2", URL: "https://github.com/o/r/commit/" + other,
+		Files: []github.File{{Path: "other-module/src/Rights.go", Status: "added",
+			Patch: "+func restrictToAdmin(doc *Document) bool {\n+\treturn doc.SetRights(adminGroupReference)\n"}}}
+	e := engine(reg)
+	e.GitHub = gh
+	v := fixVuln(rng("i=14.10.0", "f=14.10.6"))
+	v.References = append(v.References, osv.Reference{Type: "FIX", URL: "https://github.com/o/r/commit/" + other})
+	fs := e.Run(ctx, v)
+	for _, f := range only(fs, FIX001) {
+		if f.Severity != Info {
+			t.Errorf("partial fix must be info only: %s", dump([]Finding{f}))
+		}
+	}
+	expectOne(t, fs, FIX001, Info, "includes versions that already contain the fix", "outside this package's artifacts")
+}
+
+func TestFIX001IgnoresRevertsAndSupersededCommits(t *testing.T) {
+	reg := goFixRegistry([]string{"1.0.0", "1.0.1", "1.0.2"}, "1.0.2")
+	gh := fixGitHub()
+	revert := "cccccccccccccccccccccccccccccccccccccccc"
+	gh.commits[revert] = &github.Commit{Repo: "o/r", SHA: revert, Parent: "p3", Message: "Revert \"Add feature\"", URL: "https://github.com/o/r/commit/" + revert,
+		Files: []github.File{{Path: "pkg/a.go", Status: "modified", Patch: "+\treturn legacyBehaviourRestored(p)\n+\tif legacyMode { return true }\n"}}}
+	gh.raw["p3:pkg/a.go"] = vulnGo
+	e := engine(reg)
+	e.GitHub = gh
+	v := fixVuln(rng("i=0", "f=1.0.2"))
+	v.References = append(v.References, osv.Reference{Type: "WEB", URL: "https://github.com/o/r/commit/" + revert})
+	fs := e.Run(ctx, v)
+	expectOne(t, fs, FIX001, Info, "1.0.2: contains", "1.0.1: lacks")
+}
+
+func TestFIX001PrereleasesOfFixedVersion(t *testing.T) {
+	reg := goFixRegistry([]string{"1.24.0", "1.25.0-rc1", "1.25.0-rc2", "1.25.0"}, "1.25.0-rc1", "1.25.0-rc2", "1.25.0")
+	e := engine(reg)
+	e.GitHub = fixGitHub()
+	fs := e.Run(ctx, fixVuln(rng("i=0", "f=1.25.0")))
+	expectOne(t, fs, FIX001, Info, "pre-release 1.25.0-rc1")
+	for _, f := range fs {
+		if f.Severity != Info {
+			t.Errorf("unexpected: %s", dump([]Finding{f}))
+		}
+	}
+}
+
+func TestRNGEvidenceFromRemovedLines(t *testing.T) {
+	// A fix that replaces a line: removed-line presence proves the old
+	// code is still there (case 2: Cilium debug log leaking header values).
+	const oldLine = `log.Debugf("HeaderMatches: Adding %s: %s", hdr.Name, value)`
+	const newLine = `log.Debugf("HeaderMatches: Adding %s", hdr.Name)`
+	body := func(l string) string { return "package envoy\n\nfunc f() {\n\t" + l + "\n}\n" }
+	vs := append(seq("1.10.", 0, 3), "1.11.0", "1.11.1")
+	reg := &fakeRegistry{eco: versions.Go, pkgs: map[string][]string{"example.com/m": vs}, files: map[string]map[string]string{}}
+	for _, v := range vs {
+		l := oldLine
+		if v == "1.11.1" {
+			l = newLine
+		}
+		reg.files[v] = map[string]string{"pkg/envoy/server.go": body(l)}
+	}
+	gh := &fakeGitHub{commits: map[string]*github.Commit{fixSHA: {Repo: "o/r", SHA: fixSHA, Parent: "parent", URL: "u",
+		Files: []github.File{{Path: "pkg/envoy/server.go", Status: "modified", Patch: "-\t" + oldLine + "\n+\t" + newLine + "\n"}}}},
+		raw: map[string]string{"parent:pkg/envoy/server.go": body(oldLine), fixSHA + ":pkg/envoy/server.go": body(newLine)}}
+	e := engine(reg)
+	e.GitHub = gh
+	v := vuln("GHSA-pg5p", versions.Go, "example.com/m", rng("i=1.10.0", "la=1.10.0"), rng("i=1.11.0", "f=1.11.1"))
+	v.References = []osv.Reference{{Type: "FIX", URL: "https://github.com/o/r/commit/" + fixSHA}}
+	fs := e.Run(ctx, v)
+	expectOne(t, fs, RNG001, Warning, "1.10.3 lacks the fix", "still contains 1/1 lines the fix removed")
+}
+
+func TestRNG002MidLineIntroductions(t *testing.T) {
+	reg := &fakeRegistry{eco: versions.Maven, pkgs: map[string][]string{"org.x:auth": {
+		"13.10.8", "13.10.11", "14.0", "14.3.1", "14.4.3", "14.4.7", "14.6", "14.10"}}}
+	v := vuln("GHSA-jjm5", versions.Maven, "org.x:auth", rng("i=13.10.8", "f=13.10.11"), rng("i=14.4.3", "f=14.4.7"), rng("i=14.6", "f=14.10"))
+	fs := engine(reg).Run(ctx, v)
+	for _, f := range only(fs, RNG002) {
+		if f.Severity != Info {
+			t.Errorf("ranges introduced mid-line: gaps are info only: %s", dump([]Finding{f}))
+		}
 	}
 }

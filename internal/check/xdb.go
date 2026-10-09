@@ -3,9 +3,13 @@ package check
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Slymaster/isitfixed/internal/osv"
+	"github.com/Slymaster/isitfixed/internal/versions"
 )
 
 const maxAliasRecords = 6
@@ -79,11 +83,29 @@ func (e *Engine) checkCrossDB(ctx context.Context, a *advisoryCtx) {
 				continue
 			}
 			for _, og := range other {
-				if og.Eco != mine.Eco || !similarName(mine.Name, og.Name) {
+				if og.Eco != mine.Eco {
+					continue
+				}
+				msg := ""
+				if mine.Eco == versions.Go && goBase(mine.Name) == goBase(og.Name) {
+					// Same module, different major-version suffix: only a
+					// problem when this advisory's versions do not match
+					// its own suffix but match the alias record's.
+					ms := majors(mine)
+					if len(ms) == 0 || consistent(goSuffix(mine.Name), ms) || !consistent(goSuffix(og.Name), ms) {
+						continue
+					}
+					msg = fmt.Sprintf("this advisory's versions for %s are major version %s, which belong to module %s (as listed by %s)",
+						mine.Name, joinInts(ms), og.Name, al.ID)
+				} else if strings.HasPrefix(mine.Name, og.Name+"/") || strings.HasPrefix(og.Name, mine.Name+"/") {
+					continue // package path vs. its module path
+				} else if similarName(mine.Name, og.Name) {
+					msg = fmt.Sprintf("%s does not list %s but lists the similarly named %s", al.ID, mine.Name, og.Name)
+				} else {
 					continue
 				}
 				f := Finding{Check: XDB001, Severity: Warning, Ecosystem: mine.Eco, Package: mine.Name,
-					Message: fmt.Sprintf("%s does not list %s but lists the similarly named %s", al.ID, mine.Name, og.Name),
+					Message: msg,
 					Details: []string{fmt.Sprintf("this advisory's ranges for %s: %s; %s ranges for %s: %s",
 						mine.Name, describeAll(mine), al.ID, og.Name, describeAll(og))},
 					Evidence: []string{osv.URL(al.ID)}}
@@ -98,7 +120,9 @@ func (e *Engine) checkCrossDB(ctx context.Context, a *advisoryCtx) {
 			if !ok {
 				continue
 			}
-			if g.Pkg == nil || len(g.Pkg.Releases) == 0 {
+			// Ranges built on versions the registry does not have (e.g.
+			// git tags that are not Go module versions) cannot be compared.
+			if g.Pkg == nil || len(g.Pkg.Releases) == 0 || len(g.missing) > 0 {
 				continue
 			}
 			og.Pkg = g.Pkg
@@ -174,4 +198,56 @@ func runs(g *group, subset []string) string {
 		out = append(out[:8], fmt.Sprintf("(+%d more runs)", len(out)-8))
 	}
 	return strings.Join(out, ", ")
+}
+
+var majorSuffixRe = regexp.MustCompile(`/v([2-9]|[1-9][0-9]+)$`)
+
+// goSuffix returns the major version implied by a Go module path suffix
+// (1 when there is none).
+func goSuffix(name string) int {
+	if m := majorSuffixRe.FindStringSubmatch(name); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	return 1
+}
+
+func goBase(name string) string { return majorSuffixRe.ReplaceAllString(name, "") }
+
+// majors returns the major versions of a group's range endpoints.
+func majors(g *group) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, iv := range g.Intervals {
+		for _, v := range []string{iv.Intro, iv.Fixed, iv.LastAffected} {
+			if v == "" || v == "0" || isPseudo(g.Eco, v) {
+				continue
+			}
+			head, _, _ := strings.Cut(v, ".")
+			n, err := strconv.Atoi(head)
+			if err == nil && !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+func consistent(suffix int, ms []int) bool {
+	for _, m := range ms {
+		if suffix >= 2 && m != suffix || suffix < 2 && m > 1 {
+			return false
+		}
+	}
+	return true
+}
+
+func joinInts(ns []int) string {
+	var s []string
+	for _, n := range ns {
+		s = append(s, strconv.Itoa(n))
+	}
+	return strings.Join(s, ", ")
 }

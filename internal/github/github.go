@@ -211,3 +211,23 @@ func (c *Client) RawFile(ctx context.Context, repo, sha, path string) ([]byte, e
 	}
 	return resp.Body, nil
 }
+
+// Tags lists a repository's tag names (one API call; the matching-refs
+// endpoint is not paginated).
+func (c *Client) Tags(ctx context.Context, repo string) ([]string, error) {
+	b, err := c.get(ctx, "/repos/"+repo+"/git/matching-refs/tags", false)
+	if err != nil {
+		return nil, err
+	}
+	var refs []struct {
+		Ref string `json:"ref"`
+	}
+	if err := json.Unmarshal(b, &refs); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, strings.TrimPrefix(r.Ref, "refs/tags/"))
+	}
+	return out, nil
+}

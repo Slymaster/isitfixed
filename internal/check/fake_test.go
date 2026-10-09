@@ -178,3 +178,29 @@ func expectOne(t *testing.T, fs []Finding, check string, sev Severity, contains 
 	}
 	return match[0]
 }
+
+// fakeGoRegistry adds the Go-specific lookups used by VER001.
+type fakeGoRegistry struct {
+	*fakeRegistry
+	modules map[string][]string // other module paths -> versions
+	origin  string
+}
+
+func (f *fakeGoRegistry) ExactVersion(_ context.Context, mod, v string) bool {
+	for _, x := range f.modules[mod] {
+		if versions.Equal(versions.Go, x, v) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeGoRegistry) Origin(context.Context, string) (string, string) { return f.origin, "" }
+
+// fakeTags lists git tags per repository.
+type fakeTags struct {
+	fakeGitHub
+	tags map[string][]string
+}
+
+func (f *fakeTags) Tags(_ context.Context, repo string) ([]string, error) { return f.tags[repo], nil }

@@ -3,6 +3,8 @@ package check
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Slymaster/isitfixed/internal/fix"
@@ -27,6 +29,7 @@ type rngCandidate struct {
 	// keep is the interval to rewrite when the fix appears mid-way (RNG001).
 	intro string
 	// filled by FIX001
+	partialFix  bool
 	probed      bool
 	result      fix.Result
 	artURL      string
@@ -42,10 +45,22 @@ func (c *rngCandidate) finding() Finding {
 	}
 	switch c.result.Status {
 	case fix.Lacks:
-		f.Severity = Warning
-		f.Details = append(f.Details, fmt.Sprintf("confirmed by content: %s does not contain the fix (%d/%d distinctive lines present)",
-			c.probe, c.result.Present, c.result.Applicable))
 		f.Evidence = append(f.Evidence, c.artURL)
+		r := c.result
+		switch {
+		case r.OldApplicable > 0 && 10*r.OldPresent >= 7*r.OldApplicable:
+			f.Severity = Warning
+			f.Details = append(f.Details, fmt.Sprintf("confirmed by content: %s lacks the fix (%d/%d distinctive lines in their fixed state) and still contains %d/%d lines the fix removed",
+				c.probe, r.Present, r.Applicable, r.OldPresent, r.OldApplicable))
+		case r.OldApplicable > 0 && 10*r.OldPresent <= 3*r.OldApplicable:
+			f.Severity = Info
+			f.Suggested = nil
+			f.Details = append(f.Details, fmt.Sprintf("%s contains neither the fix nor the code it removed (%d/%d removed lines present), so it was probably never affected",
+				c.probe, r.OldPresent, r.OldApplicable))
+		default:
+			f.Details = append(f.Details, fmt.Sprintf("%s does not contain the fix (%d/%d distinctive lines present); the fix only adds code, so this does not prove the vulnerable code is present",
+				c.probe, r.Present, r.Applicable))
+		}
 	case fix.Contains:
 		f.Evidence = append(f.Evidence, c.artURL)
 		if c.earliest == "" || c.earliest == c.uncovered[0] {
@@ -173,7 +188,9 @@ func (e *Engine) rangeCandidates(ctx context.Context, a *advisoryCtx, g *group) 
 		}
 		before, end := endsBefore(g, l.first())
 		after, next := startsAfter(g, l.last())
-		if !before || !after || !e.lineBranchedBeforeFix(ctx, g, l, end) {
+		// Go pseudo-versions order before every tagged release, so a range
+		// ending at one says nothing about the tagged lines after it.
+		if !before || !after || isPseudo(g.Eco, end) || !e.lineBranchedBeforeFix(ctx, g, l, end) {
 			continue
 		}
 		gaps = append(gaps, gapLine{l, end, next.Intro})
@@ -191,15 +208,45 @@ func (e *Engine) rangeCandidates(ctx context.Context, a *advisoryCtx, g *group) 
 			vs = append(vs, x.l.releases...)
 		}
 		first, last := run[0].l.first(), run[len(run)-1].l.last()
-		a.rng = append(a.rng, &rngCandidate{check: RNG002, g: g, sev: Warning, probe: last, uncovered: vs,
+		sev := Warning
+		details := []string{"a line released before the preceding fix and never patched is still vulnerable; if these versions are affected, add a range for them"}
+		if mid := midLineIntro(g); mid != "" {
+			// "introduced: 14.4.3" means the vulnerable code arrived in a
+			// patch release (often a backport), so gaps between ranges may
+			// be lines that never had it.
+			sev = Info
+			details = []string{fmt.Sprintf("a range of this package is introduced mid-line (%s), which suggests the vulnerable code arrived through patch releases; these lines may never have had it", mid)}
+		}
+		a.rng = append(a.rng, &rngCandidate{check: RNG002, g: g, sev: sev, probe: last, uncovered: vs,
 			message: fmt.Sprintf("release line(s) %s (%d versions: %s) lie between affected ranges (after the range ending at %s, before the one introduced at %s) and no version of them is covered",
 				strings.Join(keys, ", "), len(vs), compact(vs), run[0].end, run[0].next),
-			details:   []string{"a line released before the preceding fix and never patched is still vulnerable; if these versions are affected, add a range for them"},
+			details:   details,
 			evidence:  []string{g.Pkg.URL},
 			suggested: [][]osv.Event{{{Introduced: first}, {LastAffected: last}}},
 		})
 		i = j + 1
 	}
+}
+
+// midLineIntro returns the first range introduction at a patch release.
+func midLineIntro(g *group) string {
+	for _, iv := range g.Intervals {
+		if iv.Intro != "0" && midLine(g.Eco, iv.Intro) {
+			return iv.Intro
+		}
+	}
+	return ""
+}
+
+// midLine reports whether v is a patch release (third numeric component
+// non-zero), e.g. 14.4.3.
+func midLine(eco, v string) bool {
+	parts := strings.FieldsFunc(versions.Normalize(eco, v), func(r rune) bool { return r == '.' || r == '-' })
+	if len(parts) < 3 {
+		return false
+	}
+	n, err := strconv.Atoi(parts[2])
+	return err == nil && n > 0
 }
 
 func slicesAny(vs []string, f func(string) bool) bool {
@@ -251,12 +298,29 @@ func startsAfter(g *group, v string) (bool, interval) {
 // keep the line.
 func (e *Engine) lineBranchedBeforeFix(ctx context.Context, g *group, l *line, fixed string) bool {
 	tl, ok1 := g.Reg.PublishedAt(ctx, g.Name, l.first())
+	// An unpublished fixed version is dated by the next published version
+	// of its line.
+	if r, ok := g.Pkg.Find(fixed); ok {
+		fixed = r.Version
+	} else {
+		for _, r := range g.Pkg.Releases {
+			if versions.Compare(g.Eco, r.Version, fixed) > 0 && versions.Line(g.Eco, r.Version) == versions.Line(g.Eco, fixed) {
+				fixed = r.Version
+				break
+			}
+		}
+	}
 	tf, ok2 := g.Reg.PublishedAt(ctx, g.Name, fixed)
 	if !ok1 || !ok2 {
 		return true
 	}
 	return tl.Before(tf)
 }
+
+var pseudoRe = regexp.MustCompile(`(^|[.-])(0\.)?[0-9]{14}-[0-9a-f]{12}$`)
+
+// isPseudo reports whether v is a Go pseudo-version.
+func isPseudo(eco, v string) bool { return eco == versions.Go && pseudoRe.MatchString(v) }
 
 // compact renders a version list briefly: "1.10.1, 1.10.2 … 1.10.20".
 func compact(vs []string) string {
