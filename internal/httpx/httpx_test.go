@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -123,5 +124,22 @@ func TestRanged(t *testing.T) {
 	io.ReadAll(io.NewSectionReader(f2, 0, f2.Size()))
 	if requests.Load() != n {
 		t.Errorf("cached ranged file refetched %d times", requests.Load()-n)
+	}
+}
+
+func TestIsFailure(t *testing.T) {
+	cases := map[error]bool{
+		nil:                       false,
+		ErrNotFound:               false,
+		&StatusError{Status: 422}: false,
+		&StatusError{Status: 503}: true,
+		&StatusError{Status: 403}: true,
+		&url.Error{Op: "Get", URL: "https://x", Err: io.EOF}: true,
+		io.ErrUnexpectedEOF: false,
+	}
+	for err, want := range cases {
+		if got := IsFailure(err); got != want {
+			t.Errorf("IsFailure(%v) = %v, want %v", err, got, want)
+		}
 	}
 }

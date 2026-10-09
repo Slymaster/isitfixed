@@ -5,10 +5,13 @@ package osv
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/Slymaster/isitfixed/internal/httpx"
@@ -86,6 +89,14 @@ func (v *Vuln) IsMalware() bool {
 	return strings.HasPrefix(v.ID, "MAL-") || strings.HasPrefix(strings.ToLower(v.Summary), "malware in ")
 }
 
+// ErrNotOSV is returned for valid JSON that is not an OSV record.
+var ErrNotOSV = errors.New("not an OSV record (no id)")
+
+var idRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$`)
+
+// ValidID reports whether s looks like an advisory ID (GHSA-…, CVE-…, GO-…).
+func ValidID(s string) bool { return idRe.MatchString(s) }
+
 // ParseFile reads one OSV JSON file.
 func ParseFile(path string) (*Vuln, error) {
 	b, err := os.ReadFile(path)
@@ -94,10 +105,10 @@ func ParseFile(path string) (*Vuln, error) {
 	}
 	var v Vuln
 	if err := json.Unmarshal(b, &v); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: invalid JSON: %w", path, err)
 	}
 	if v.ID == "" {
-		return nil, fmt.Errorf("%s: not an OSV record (no id)", path)
+		return nil, fmt.Errorf("%s: %w", path, ErrNotOSV)
 	}
 	v.Path = path
 	return &v, nil
@@ -143,7 +154,10 @@ func (a *API) Get(ctx context.Context, id string) (*Vuln, error) {
 	if base == "" {
 		base = "https://api.osv.dev"
 	}
-	resp, err := a.HTTP.Get(ctx, httpx.Request{URL: base + "/v1/vulns/" + id})
+	if !ValidID(id) {
+		return nil, fmt.Errorf("invalid advisory ID %q", id)
+	}
+	resp, err := a.HTTP.Get(ctx, httpx.Request{URL: base + "/v1/vulns/" + url.PathEscape(id)})
 	if err != nil {
 		return nil, err
 	}
@@ -155,4 +169,4 @@ func (a *API) Get(ctx context.Context, id string) (*Vuln, error) {
 }
 
 // URL returns the osv.dev web URL of a record.
-func URL(id string) string { return "https://osv.dev/vulnerability/" + id }
+func URL(id string) string { return "https://osv.dev/vulnerability/" + url.PathEscape(id) }

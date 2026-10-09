@@ -46,6 +46,7 @@ type Client struct {
 	HTTP *http.Client
 
 	mu    sync.Mutex
+	down  map[string]error // hosts that failed after retries
 	sems  map[string]chan struct{}
 	last  map[string]time.Time
 	pace  map[string]*sync.Mutex
@@ -149,7 +150,7 @@ func (c *Client) writeCache(r Request, resp *Response) {
 		return
 	}
 	p := c.cachePath(c.key(r.URL))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return
 	}
 	keep := http.Header{}
@@ -160,10 +161,10 @@ func (c *Client) writeCache(r Request, resp *Response) {
 	}
 	mb, _ := json.Marshal(cacheMeta{URL: r.URL, Status: resp.Status, Time: time.Now(), Header: keep})
 	tmp := p + ".tmp" + strconv.Itoa(os.Getpid())
-	if os.WriteFile(tmp, resp.Body, 0o644) == nil {
+	if os.WriteFile(tmp, resp.Body, 0o600) == nil {
 		_ = os.Rename(tmp, p)
 	}
-	_ = os.WriteFile(p+".meta", mb, 0o644)
+	_ = os.WriteFile(p+".meta", mb, 0o600)
 }
 
 func (c *Client) acquire(ctx context.Context, host string) (func(), error) {
@@ -257,8 +258,35 @@ func statusErr(u string, status int) error {
 	case status == 404 || status == 410:
 		return ErrNotFound
 	default:
-		return fmt.Errorf("GET %s: HTTP %d", u, status)
+		return &StatusError{URL: u, Status: status}
 	}
+}
+
+// IsFailure reports whether err means a check could not be completed
+// (network failure, server error, rate limit or authentication problem)
+// rather than an answer about the data (not found, or a 4xx rejecting the
+// request such as GitHub's 422 for an unknown commit).
+func IsFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Status >= 500 || se.Status == 429 || se.Status == 401 || se.Status == 403
+	}
+	// Transport failures (DNS, refused connections, TLS, timeouts) surface
+	// as *url.Error; anything else (not found, unmerged PR, no artifact,
+	// malformed archive) is an answer about the data.
+	var ue *url.Error
+	return errors.As(err, &ue)
+}
+
+// Host returns the host of a URL, for error messages.
+func Host(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil {
+		return u.Host
+	}
+	return rawURL
 }
 
 // StatusError is returned for unexpected HTTP statuses after retries.
@@ -281,6 +309,9 @@ func (c *Client) doMax(ctx context.Context, method, rawURL string, hdr map[strin
 	if err != nil {
 		return nil, err
 	}
+	if err := c.downErr(u.Host); err != nil {
+		return nil, err
+	}
 	release, err := c.acquire(ctx, u.Host)
 	if err != nil {
 		return nil, err
@@ -288,6 +319,7 @@ func (c *Client) doMax(ctx context.Context, method, rawURL string, hdr map[strin
 	defer release()
 	delay := c.Backoff
 	var lastErr error
+	transportFailures := 0
 	for attempt := 0; attempt <= c.Retries; attempt++ {
 		if attempt > 0 {
 			select {
@@ -310,7 +342,14 @@ func (c *Client) doMax(ctx context.Context, method, rawURL string, hdr map[strin
 		c.mu.Unlock()
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			lastErr = err
+			transportFailures++
+			if transportFailures > 2 {
+				break // the host is unreachable; status-code retries continue as configured
+			}
 			continue
 		}
 		if resp.ContentLength > max {
@@ -336,5 +375,39 @@ func (c *Client) doMax(ctx context.Context, method, rawURL string, hdr map[strin
 		}
 		return &Response{Status: resp.StatusCode, Body: body, Header: resp.Header}, nil
 	}
+	var se *StatusError
+	if !errors.As(lastErr, &se) {
+		// Transport failure after all retries: fail fast for the rest of
+		// the run instead of retrying every request to a dead host.
+		c.markDown(u.Host, lastErr)
+	}
 	return nil, lastErr
+}
+
+func (c *Client) downErr(host string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.down[host]
+}
+
+func (c *Client) markDown(host string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.down == nil {
+		c.down = map[string]error{}
+	}
+	c.down[host] = err
+}
+
+// FailedHost returns the host a request error refers to, or "".
+func FailedHost(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return Host(ue.URL)
+	}
+	var se *StatusError
+	if errors.As(err, &se) {
+		return Host(se.URL)
+	}
+	return ""
 }

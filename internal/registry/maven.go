@@ -62,24 +62,29 @@ func (m *Maven) repoFor(ctx context.Context, name string) (string, *mavenMeta, e
 	if err != nil {
 		return "", nil, err
 	}
-	var lastErr error = ErrNotFound
+	// Report the first repository that failed (normally Maven Central),
+	// not whichever mirror happened to be tried last.
+	var firstErr error
 	for _, r := range m.repos() {
 		resp, err := m.HTTP.Get(ctx, httpx.Request{URL: gaPath(r, g, a) + "/maven-metadata.xml"})
 		if err == ErrNotFound {
 			continue
 		}
-		if err != nil {
-			lastErr = err
-			continue
+		if err == nil {
+			var md mavenMeta
+			if err = xml.Unmarshal(resp.Body, &md); err == nil {
+				return r, &md, nil
+			}
+			err = fmt.Errorf("%s: invalid maven-metadata.xml for %s: %w", httpx.Host(r), name, err)
 		}
-		var md mavenMeta
-		if err := xml.Unmarshal(resp.Body, &md); err != nil {
-			lastErr = fmt.Errorf("%s: %w", name, err)
-			continue
+		if firstErr == nil {
+			firstErr = err
 		}
-		return r, &md, nil
 	}
-	return "", nil, lastErr
+	if firstErr != nil {
+		return "", nil, firstErr
+	}
+	return "", nil, ErrNotFound
 }
 
 // Lookup implements Registry.
@@ -125,17 +130,17 @@ func (m *Maven) VersionExists(ctx context.Context, name, version string) (bool, 
 	if _, _, err := splitGA(name); err != nil {
 		return false, err
 	}
-	var lastErr error
+	var firstErr error
 	for _, r := range m.repos() {
 		_, err := m.HTTP.Head(ctx, httpx.Request{URL: m.fileURL(r, name, version, "", "pom"), Immutable: true})
 		if err == nil {
 			return true, nil
 		}
-		if err != ErrNotFound {
-			lastErr = err
+		if err != ErrNotFound && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return false, lastErr
+	return false, firstErr
 }
 
 // PublishedAt implements Registry using the pom's Last-Modified header.
