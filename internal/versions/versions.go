@@ -28,6 +28,17 @@ func Supported(eco string) bool {
 	return false
 }
 
+// Canonical returns the canonical spelling of a supported ecosystem name,
+// matched case-insensitively ("go" -> "Go", "CRATES.IO" -> "crates.io").
+func Canonical(eco string) (string, bool) {
+	for _, e := range []string{Go, Npm, Maven, Crates} {
+		if strings.EqualFold(e, strings.TrimSpace(eco)) {
+			return e, true
+		}
+	}
+	return "", false
+}
+
 // Normalize returns the canonical OSV spelling of a version for the
 // ecosystem. For Go it strips a leading "v" and a "+incompatible" suffix, so
 // that proxy.golang.org versions compare equal to OSV versions.

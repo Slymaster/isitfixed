@@ -2,6 +2,8 @@ package check
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Slymaster/isitfixed/internal/github"
+	"github.com/Slymaster/isitfixed/internal/httpx"
 	"github.com/Slymaster/isitfixed/internal/osv"
 	"github.com/Slymaster/isitfixed/internal/registry"
 	"github.com/Slymaster/isitfixed/internal/versions"
@@ -44,40 +47,40 @@ func TestIntervals(t *testing.T) {
 	}
 }
 
-func TestPKG001(t *testing.T) {
+func TestIF001(t *testing.T) {
 	reg := &fakeRegistry{eco: versions.Go, pkgs: map[string][]string{"github.com/cilium/cilium": {"1.17.0", "1.18.0"}}}
 	v := vuln("GHSA-test", versions.Go, "github.com/cilium/cilium", rng("i=0", "f=1.17.17"))
 	v.Affected = append(v.Affected, vuln("", versions.Go, "github.com/cilium/ciliumCilium", rng("i=1.18.0", "f=1.18.11")).Affected...)
 	fs := engine(reg).Run(ctx, v)
-	expectOne(t, fs, PKG001, Error, "github.com/cilium/ciliumCilium was not found", "did you mean github.com/cilium/cilium")
-	if n := len(only(fs, PKG001)); n != 1 {
-		t.Errorf("want only the misspelled package flagged, got %d PKG001 findings", n)
+	expectOne(t, fs, IF001, Error, "github.com/cilium/ciliumCilium was not found", "did you mean github.com/cilium/cilium")
+	if n := len(only(fs, IF001)); n != 1 {
+		t.Errorf("want only the misspelled package flagged, got %d IF001 findings", n)
 	}
 }
 
-func TestVER001(t *testing.T) {
+func TestIF002(t *testing.T) {
 	reg := &fakeRegistry{eco: versions.Maven, pkgs: map[string][]string{
 		"org.springframework.cloud:spring-cloud-gateway": {"2.2.0.RELEASE", "2.2.9.RELEASE", "2.2.10.RELEASE", "3.0.0", "3.0.5"},
 	}}
 	v := vuln("GHSA-2r2v", versions.Maven, "org.springframework.cloud:spring-cloud-gateway",
 		rng("i=3.0.0", "f=3.0.5"), rng("i=2.2.0", "f=2.2.10.RELEASE0.5"), rng("i=2.1.0", "la=2.1.9"))
 	fs := engine(reg).Run(ctx, v)
-	expectOne(t, fs, VER001, Error, "fixed version 2.2.10.RELEASE0.5 is not published", "2.2.10.RELEASE < 2.2.10.RELEASE0.5 < 3.0.0")
-	expectOne(t, fs, VER001, Warning, "introduced version 2.1.0")
-	expectOne(t, fs, VER001, Warning, "last_affected version 2.1.9")
-	for _, f := range only(fs, VER001) {
+	expectOne(t, fs, IF002, Error, "fixed version 2.2.10.RELEASE0.5 is not published", "2.2.10.RELEASE < 2.2.10.RELEASE0.5 < 3.0.0")
+	expectOne(t, fs, IF002, Warning, "introduced version 2.1.0")
+	expectOne(t, fs, IF002, Warning, "last_affected version 2.1.9")
+	for _, f := range only(fs, IF002) {
 		if strings.Contains(f.Message, "version 2.2.0 ") {
 			t.Errorf("2.2.0 equals 2.2.0.RELEASE under Maven ordering, must not be flagged: %s", f.Message)
 		}
 	}
 }
 
-func TestRNG001(t *testing.T) {
+func TestIF003(t *testing.T) {
 	vs := append(append(seq("1.10.", 0, 20), "1.7.0", "1.9.0"), seq("1.11.", 0, 16)...)
 	reg := &fakeRegistry{eco: versions.Go, pkgs: map[string][]string{"github.com/cilium/cilium": vs}}
 	v := vuln("GHSA-pg5p", versions.Go, "github.com/cilium/cilium", rng("i=1.7.0", "la=1.10.0"), rng("i=1.11.0", "f=1.11.16"))
 	fs := engine(reg).Run(ctx, v)
-	f := expectOne(t, fs, RNG001, Warning, "last_affected 1.10.0", "20 later 1.10.x", "1.10.1", "1.10.20")
+	f := expectOne(t, fs, IF003, Warning, "last_affected 1.10.0", "20 later 1.10.x", "1.10.1", "1.10.20")
 	want := [][]osv.Event{{{Introduced: "1.7.0"}, {LastAffected: "1.10.20"}}}
 	if !reflect.DeepEqual(f.Suggested, want) {
 		t.Errorf("suggested = %+v, want %+v", f.Suggested, want)
@@ -85,11 +88,11 @@ func TestRNG001(t *testing.T) {
 
 	// Without a fixed newer line the signal is weak: info only.
 	v = vuln("GHSA-weak", versions.Go, "github.com/cilium/cilium", rng("i=1.7.0", "la=1.10.0"))
-	expectOne(t, engine(reg).Run(ctx, v), RNG001, Info, "last_affected 1.10.0")
+	expectOne(t, engine(reg).Run(ctx, v), IF003, Info, "last_affected 1.10.0")
 
 	// last_affected at the newest version: nothing to report.
 	v = vuln("GHSA-ok", versions.Go, "github.com/cilium/cilium", rng("i=1.7.0", "la=1.10.20"), rng("i=1.11.0", "f=1.11.16"))
-	if fs := only(engine(reg).Run(ctx, v), RNG001); len(fs) != 0 {
+	if fs := only(engine(reg).Run(ctx, v), IF003); len(fs) != 0 {
 		t.Errorf("unexpected: %s", dump(fs))
 	}
 }
@@ -103,12 +106,12 @@ func quarkusRegistry() *fakeRegistry {
 	}}, published: map[string]time.Time{}}
 }
 
-func TestRNG002(t *testing.T) {
+func TestIF004(t *testing.T) {
 	reg := quarkusRegistry()
 	v := vuln("GHSA-rc95", versions.Maven, "io.quarkus:quarkus-vertx-http",
 		rng("i=3.21.0", "f=3.27.3.1"), rng("i=3.30.0", "f=3.33.1.1"), rng("i=3.34.0", "f=3.35.2"))
 	fs := engine(reg).Run(ctx, v)
-	f := expectOne(t, fs, RNG002, Warning, "3.28, 3.29", "3.28.0.CR1")
+	f := expectOne(t, fs, IF004, Warning, "3.28, 3.29", "3.28.0.CR1")
 	if strings.Contains(f.Message, "3.27") && !strings.Contains(f.Message, "3.27.3.1") {
 		t.Errorf("partially covered 3.27 must not be flagged: %s", f.Message)
 	}
@@ -122,7 +125,7 @@ func TestRNG002(t *testing.T) {
 	reg.published["3.27.3.1"] = day(1)
 	reg.published["3.28.0.CR1"] = day(2)
 	reg.published["3.29.0"] = day(3)
-	if fs := only(engine(reg).Run(ctx, v), RNG002); len(fs) != 0 {
+	if fs := only(engine(reg).Run(ctx, v), IF004); len(fs) != 0 {
 		t.Errorf("lines published after the fix must not be flagged:\n%s", dump(fs))
 	}
 }
@@ -166,12 +169,12 @@ func fixVuln(ranges ...osv.Range) *osv.Vuln {
 	return v
 }
 
-func TestFIX001Verified(t *testing.T) {
+func TestIF005Verified(t *testing.T) {
 	reg := goFixRegistry([]string{"1.0.0", "1.0.1", "1.0.2"}, "1.0.2")
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	fs := e.Run(ctx, fixVuln(rng("i=0", "f=1.0.2")))
-	expectOne(t, fs, FIX001, Info, "1.0.2: contains (2/2", "1.0.1: lacks (0/2")
+	expectOne(t, fs, IF005, Info, "1.0.2: contains (2/2", "1.0.1: lacks (0/2")
 	for _, f := range fs {
 		if f.Severity != Info {
 			t.Errorf("unexpected finding: %s", dump([]Finding{f}))
@@ -179,25 +182,25 @@ func TestFIX001Verified(t *testing.T) {
 	}
 }
 
-func TestFIX001FixedLacksFix(t *testing.T) {
+func TestIF005FixedLacksFix(t *testing.T) {
 	reg := goFixRegistry([]string{"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"}, "1.0.3", "1.0.4")
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	fs := e.Run(ctx, fixVuln(rng("i=0", "f=1.0.2")))
-	f := expectOne(t, fs, FIX001, Error, "fixed version 1.0.2 does not contain the fix", "earliest version of the line containing the fix: 1.0.3")
+	f := expectOne(t, fs, IF005, Error, "fixed version 1.0.2 does not contain the fix", "earliest version of the line containing the fix: 1.0.3")
 	want := [][]osv.Event{{{Introduced: "0"}, {Fixed: "1.0.3"}}}
 	if !reflect.DeepEqual(f.Suggested, want) {
 		t.Errorf("suggested = %+v", f.Suggested)
 	}
 }
 
-func TestFIX001RangeIncludesFixedVersions(t *testing.T) {
+func TestIF005RangeIncludesFixedVersions(t *testing.T) {
 	vs := seq("1.0.", 0, 9)
 	reg := goFixRegistry(vs, seq("1.0.", 4, 9)...)
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	fs := e.Run(ctx, fixVuln(rng("i=1.0.0", "f=1.0.9")))
-	f := expectOne(t, fs, FIX001, Warning, "range [1.0.0, 1.0.9) includes versions that already contain the fix", "the fix first appears in 1.0.4")
+	f := expectOne(t, fs, IF005, Warning, "range [1.0.0, 1.0.9) includes versions that already contain the fix", "the fix first appears in 1.0.4")
 	want := [][]osv.Event{{{Introduced: "1.0.0"}, {Fixed: "1.0.4"}}}
 	if !reflect.DeepEqual(f.Suggested, want) {
 		t.Errorf("suggested = %+v", f.Suggested)
@@ -207,7 +210,7 @@ func TestFIX001RangeIncludesFixedVersions(t *testing.T) {
 	}
 }
 
-func TestFIX001BackportAcrossLinesWithUnpublishedFixed(t *testing.T) {
+func TestIF005BackportAcrossLinesWithUnpublishedFixed(t *testing.T) {
 	// Quarkus-like: [3.34.0, 3.35.1.1) where 3.35.1.1 does not exist, the
 	// fix was backported to 3.34.7 and released in 3.35.2.
 	vs := []string{"3.34.0", "3.34.5", "3.34.6", "3.34.7", "3.35.0", "3.35.1", "3.35.2", "3.35.3"}
@@ -226,28 +229,28 @@ func TestFIX001BackportAcrossLinesWithUnpublishedFixed(t *testing.T) {
 	v := vuln("GHSA-rc95", versions.Maven, "io.q:http", rng("i=3.34.0", "f=3.35.1.1"))
 	v.References = []osv.Reference{{Type: "WEB", URL: "https://github.com/o/r/commit/" + fixSHA}}
 	fs := e.Run(ctx, v)
-	expectOne(t, fs, VER001, Error, "fixed version 3.35.1.1 is not published")
-	f := expectOne(t, fs, FIX001, Warning, "includes versions that already contain the fix", "3.34.x: the fix first appears in 3.34.7", "earliest later 3.35.x version containing the fix is 3.35.2")
+	expectOne(t, fs, IF002, Error, "fixed version 3.35.1.1 is not published")
+	f := expectOne(t, fs, IF005, Warning, "includes versions that already contain the fix", "3.34.x: the fix first appears in 3.34.7", "earliest later 3.35.x version containing the fix is 3.35.2")
 	want := [][]osv.Event{{{Introduced: "3.34.0"}, {Fixed: "3.34.7"}}, {{Introduced: "3.35.0"}, {Fixed: "3.35.2"}}}
 	if !reflect.DeepEqual(f.Suggested, want) {
 		t.Errorf("suggested = %+v, want %+v", f.Suggested, want)
 	}
 }
 
-func TestFIX001Unverifiable(t *testing.T) {
+func TestIF005Unverifiable(t *testing.T) {
 	reg := goFixRegistry([]string{"1.0.0", "1.0.1"}, "1.0.1")
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	// No references.
 	v := vuln("GHSA-norefs", versions.Go, "example.com/m", rng("i=0", "f=1.0.1"))
-	expectOne(t, e.Run(ctx, v), FIX001, Info, "unverifiable: no GitHub fix commit")
+	expectOne(t, e.Run(ctx, v), IF005, Info, "unverifiable: no GitHub fix commit")
 	// The fix touches a file the artifacts do not ship.
 	for _, files := range reg.files {
 		files["pkg/b.go"] = files["pkg/a.go"]
 		delete(files, "pkg/a.go")
 	}
 	fs := e.Run(ctx, fixVuln(rng("i=0", "f=1.0.1")))
-	expectOne(t, fs, FIX001, Info, "unverifiable: the fix's distinctive lines were not found")
+	expectOne(t, fs, IF005, Info, "unverifiable: the files changed by the fix were not found")
 	for _, f := range fs {
 		if f.Severity != Info {
 			t.Errorf("unverifiable fixes must not produce errors or warnings: %s", dump([]Finding{f}))
@@ -255,7 +258,7 @@ func TestFIX001Unverifiable(t *testing.T) {
 	}
 }
 
-func TestRNG002ConfirmedByContent(t *testing.T) {
+func TestIF004ConfirmedByContent(t *testing.T) {
 	// The 1.18 line is uncovered (its range was attached to a misspelled
 	// package); content shows 1.18.0-1.18.10 lack the fix.
 	vs := append(append(seq("1.17.", 15, 17), seq("1.18.", 0, 12)...), seq("1.19.", 0, 5)...)
@@ -263,23 +266,23 @@ func TestRNG002ConfirmedByContent(t *testing.T) {
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	fs := e.Run(ctx, fixVuln(rng("i=0", "f=1.17.17"), rng("i=1.19.0", "f=1.19.5")))
-	f := expectOne(t, fs, RNG002, Warning, "release line(s) 1.18", "the fix first appears in 1.18.11")
+	f := expectOne(t, fs, IF004, Warning, "release line(s) 1.18", "the fix first appears in 1.18.11")
 	want := [][]osv.Event{{{Introduced: "1.18.0"}, {Fixed: "1.18.11"}}}
 	if !reflect.DeepEqual(f.Suggested, want) {
 		t.Errorf("suggested = %+v", f.Suggested)
 	}
 }
 
-func TestRNG001ContentDowngrade(t *testing.T) {
+func TestIF003ContentDowngrade(t *testing.T) {
 	// last_affected 1.0.1 and 1.0.2 contains the fix: consistent, info only.
 	reg := goFixRegistry([]string{"1.0.0", "1.0.1", "1.0.2", "1.0.3", "2.0.0", "2.0.1"}, "1.0.2", "1.0.3", "2.0.1")
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	fs := e.Run(ctx, fixVuln(rng("i=1.0.0", "la=1.0.1"), rng("i=2.0.0", "f=2.0.1")))
-	expectOne(t, fs, RNG001, Info, "contain the fix")
+	expectOne(t, fs, IF003, Info, "contain the fix")
 }
 
-func TestXDB001(t *testing.T) {
+func TestIF006(t *testing.T) {
 	reg := &fakeRegistry{eco: versions.Go, pkgs: map[string][]string{"github.com/cilium/cilium": append(append(seq("1.17.", 15, 17), seq("1.18.", 0, 11)...), seq("1.19.", 0, 5)...)}}
 	ghsa := vuln("GHSA-w7c2", versions.Go, "github.com/cilium/cilium", rng("i=0", "f=1.17.17"), rng("i=1.19.0", "f=1.19.5"))
 	ghsa.Affected = append(ghsa.Affected, vuln("", versions.Go, "github.com/cilium/ciliumCilium", rng("i=1.18.0", "f=1.18.11")).Affected...)
@@ -292,12 +295,12 @@ func TestXDB001(t *testing.T) {
 		"GO-2026-1":  goRec,
 	}
 	fs := e.Run(ctx, ghsa)
-	expectOne(t, fs, XDB001, Warning, "GO-2026-1 and this advisory disagree", "affected only according to GO-2026-1 (11): 1.18.0 … 1.18.10")
-	expectOne(t, fs, XDB001, Warning, "GO-2026-1 does not list github.com/cilium/ciliumCilium but lists the similarly named github.com/cilium/cilium")
+	expectOne(t, fs, IF006, Warning, "GO-2026-1 and this advisory disagree", "affected only according to GO-2026-1 (11): 1.18.0 … 1.18.10")
+	expectOne(t, fs, IF006, Warning, "GO-2026-1 does not list github.com/cilium/ciliumCilium but lists the similarly named github.com/cilium/cilium")
 
-	// Agreement: no XDB001.
+	// Agreement: no IF006.
 	ghsa = vuln("GHSA-w7c2", versions.Go, "github.com/cilium/cilium", rng("i=0", "f=1.17.17"), rng("i=1.18.0", "f=1.18.11"), rng("i=1.19.0", "f=1.19.5"))
-	if fs := only(e.Run(ctx, ghsa), XDB001); len(fs) != 0 {
+	if fs := only(e.Run(ctx, ghsa), IF006); len(fs) != 0 {
 		t.Errorf("unexpected:\n%s", dump(fs))
 	}
 }
@@ -316,7 +319,7 @@ func TestSkipsMalwareAndWithdrawn(t *testing.T) {
 	}
 }
 
-func TestVER001GoModulePaths(t *testing.T) {
+func TestIF002GoModulePaths(t *testing.T) {
 	base := &fakeRegistry{eco: versions.Go, pkgs: map[string][]string{
 		"github.com/pion/dtls":            {"1.5.4"},
 		"github.com/portainer/portainer":  {"0.10.1"},
@@ -332,28 +335,28 @@ func TestVER001GoModulePaths(t *testing.T) {
 
 	// Major version 2 published under the /v2 module path: actionable.
 	fs := e.Run(ctx, vuln("GHSA-a", versions.Go, "github.com/pion/dtls", rng("i=0", "f=2.1.4")))
-	expectOne(t, fs, VER001, Error, "2.1.4 is not a version of module github.com/pion/dtls; it is published under module github.com/pion/dtls/v2")
+	expectOne(t, fs, IF002, Error, "2.1.4 is not a version of module github.com/pion/dtls; it is published under module github.com/pion/dtls/v2")
 	// v1 versions under a /v2 module path.
 	fs = e.Run(ctx, vuln("GHSA-b", versions.Go, "github.com/argoproj/argo-cd/v2", rng("i=0", "f=1.7.13")))
-	expectOne(t, fs, VER001, Error, "published under module github.com/argoproj/argo-cd")
+	expectOne(t, fs, IF002, Error, "published under module github.com/argoproj/argo-cd")
 	// A git tag that cannot be a module version: GHSA convention, info only.
 	fs = e.Run(ctx, vuln("GHSA-c", versions.Go, "github.com/portainer/portainer", rng("i=2.33.0", "f=2.33.8")))
-	expectOne(t, fs, VER001, Info, "fixed version 2.33.8 is a git tag of github.com/portainer/portainer")
-	expectOne(t, fs, VER001, Warning, "introduced version 2.33.0 is not published")
+	expectOne(t, fs, IF002, Info, "fixed version 2.33.8 is a git tag of github.com/portainer/portainer")
+	expectOne(t, fs, IF002, Warning, "introduced version 2.33.0 is not published")
 	// Neither: error stands.
 	fs = e.Run(ctx, vuln("GHSA-d", versions.Go, "github.com/example/missing-vers", rng("i=0", "f=1.0.1")))
-	expectOne(t, fs, VER001, Error, "fixed version 1.0.1 is not published")
+	expectOne(t, fs, IF002, Error, "fixed version 1.0.1 is not published")
 }
 
-func TestVER001IntroducedZeroSpellings(t *testing.T) {
+func TestIF002IntroducedZeroSpellings(t *testing.T) {
 	reg := &fakeRegistry{eco: versions.Npm, pkgs: map[string][]string{"gnuplot": {"0.1.0", "0.2.0"}}}
 	fs := engine(reg).Run(ctx, vuln("GHSA-z", versions.Npm, "gnuplot", rng("i=0.0.0", "f=0.2.0")))
-	if got := only(fs, VER001); len(got) != 0 {
+	if got := only(fs, IF002); len(got) != 0 {
 		t.Errorf("introduced 0.0.0 means 0:\n%s", dump(got))
 	}
 }
 
-func TestXDB001ModulePathRules(t *testing.T) {
+func TestIF006ModulePathRules(t *testing.T) {
 	reg := &fakeRegistry{eco: versions.Go, pkgs: map[string][]string{
 		"github.com/prebid/prebid-server/v3": {"3.29.0", "3.30.0"},
 		"golang.org/x/net/http2":             {"0.1.0"},
@@ -365,12 +368,12 @@ func TestXDB001ModulePathRules(t *testing.T) {
 	v := vuln("GHSA-p", versions.Go, "github.com/prebid/prebid-server/v3", rng("i=0", "la=3.30.0"))
 	v.Affected = append(v.Affected, vuln("", versions.Go, "golang.org/x/net/http2", rng("i=0", "f=0.2.0")).Affected...)
 	v.Aliases = []string{"GO-1"}
-	if fs := only(e.Run(ctx, v), XDB001); len(fs) != 0 {
+	if fs := only(e.Run(ctx, v), IF006); len(fs) != 0 {
 		t.Errorf("a different major-version module and a package-vs-module path are not typos:\n%s", dump(fs))
 	}
 }
 
-func TestFIX001PartialFixAcrossModules(t *testing.T) {
+func TestIF005PartialFixAcrossModules(t *testing.T) {
 	// Two separate fix commits; the second changes only another module of
 	// the project. The visible half being present in a range version must
 	// not produce a warning.
@@ -386,15 +389,15 @@ func TestFIX001PartialFixAcrossModules(t *testing.T) {
 	v := fixVuln(rng("i=14.10.0", "f=14.10.6"))
 	v.References = append(v.References, osv.Reference{Type: "FIX", URL: "https://github.com/o/r/commit/" + other})
 	fs := e.Run(ctx, v)
-	for _, f := range only(fs, FIX001) {
+	for _, f := range only(fs, IF005) {
 		if f.Severity != Info {
 			t.Errorf("partial fix must be info only: %s", dump([]Finding{f}))
 		}
 	}
-	expectOne(t, fs, FIX001, Info, "includes versions that already contain the fix", "outside this package's artifacts")
+	expectOne(t, fs, IF005, Info, "includes versions that already contain the fix", "outside this package's artifacts")
 }
 
-func TestFIX001IgnoresRevertsAndSupersededCommits(t *testing.T) {
+func TestIF005IgnoresRevertsAndSupersededCommits(t *testing.T) {
 	reg := goFixRegistry([]string{"1.0.0", "1.0.1", "1.0.2"}, "1.0.2")
 	gh := fixGitHub()
 	revert := "cccccccccccccccccccccccccccccccccccccccc"
@@ -406,15 +409,15 @@ func TestFIX001IgnoresRevertsAndSupersededCommits(t *testing.T) {
 	v := fixVuln(rng("i=0", "f=1.0.2"))
 	v.References = append(v.References, osv.Reference{Type: "WEB", URL: "https://github.com/o/r/commit/" + revert})
 	fs := e.Run(ctx, v)
-	expectOne(t, fs, FIX001, Info, "1.0.2: contains", "1.0.1: lacks")
+	expectOne(t, fs, IF005, Info, "1.0.2: contains", "1.0.1: lacks")
 }
 
-func TestFIX001PrereleasesOfFixedVersion(t *testing.T) {
+func TestIF005PrereleasesOfFixedVersion(t *testing.T) {
 	reg := goFixRegistry([]string{"1.24.0", "1.25.0-rc1", "1.25.0-rc2", "1.25.0"}, "1.25.0-rc1", "1.25.0-rc2", "1.25.0")
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	fs := e.Run(ctx, fixVuln(rng("i=0", "f=1.25.0")))
-	expectOne(t, fs, FIX001, Info, "pre-release 1.25.0-rc1 and later pre-releases")
+	expectOne(t, fs, IF005, Info, "pre-release 1.25.0-rc1 and later pre-releases")
 	for _, f := range fs {
 		if f.Severity != Info {
 			t.Errorf("unexpected: %s", dump([]Finding{f}))
@@ -445,32 +448,88 @@ func TestRNGEvidenceFromRemovedLines(t *testing.T) {
 	v := vuln("GHSA-pg5p", versions.Go, "example.com/m", rng("i=1.10.0", "la=1.10.0"), rng("i=1.11.0", "f=1.11.1"))
 	v.References = []osv.Reference{{Type: "FIX", URL: "https://github.com/o/r/commit/" + fixSHA}}
 	fs := e.Run(ctx, v)
-	expectOne(t, fs, RNG001, Warning, "1.10.3 lacks the fix", "still contains 1/1 lines the fix removed")
+	expectOne(t, fs, IF003, Warning, "1.10.3 lacks the fix", "still contains 1/1 lines the fix removed")
 }
 
-func TestRNG002MidLineIntroductions(t *testing.T) {
+func TestIF004MidLineIntroductions(t *testing.T) {
 	reg := &fakeRegistry{eco: versions.Maven, pkgs: map[string][]string{"org.x:auth": {
 		"13.10.8", "13.10.11", "14.0", "14.3.1", "14.4.3", "14.4.7", "14.6", "14.10"}}}
 	v := vuln("GHSA-jjm5", versions.Maven, "org.x:auth", rng("i=13.10.8", "f=13.10.11"), rng("i=14.4.3", "f=14.4.7"), rng("i=14.6", "f=14.10"))
 	fs := engine(reg).Run(ctx, v)
-	for _, f := range only(fs, RNG002) {
+	for _, f := range only(fs, IF004) {
 		if f.Severity != Info {
 			t.Errorf("ranges introduced mid-line: gaps are info only: %s", dump([]Finding{f}))
 		}
 	}
 }
 
-func TestFIX001LinesPresentFromRangeStart(t *testing.T) {
+func TestIF005LinesPresentFromRangeStart(t *testing.T) {
 	// The "fix" lines are present from the introduced version on: the
 	// referenced commit is the one that added the feature, not the fix.
 	reg := goFixRegistry(seq("1.0.", 0, 5), seq("1.0.", 0, 5)...)
 	e := engine(reg)
 	e.GitHub = fixGitHub()
 	fs := e.Run(ctx, fixVuln(rng("i=1.0.0", "f=1.0.5")))
-	expectOne(t, fs, FIX001, Info, "present from 1.0.0, the first version the range covers")
+	expectOne(t, fs, IF005, Info, "present from 1.0.0, the first version the range covers")
 	for _, f := range fs {
 		if f.Severity != Info {
 			t.Errorf("unexpected: %s", dump([]Finding{f}))
 		}
 	}
+}
+
+type failingRegistry struct {
+	*fakeRegistry
+	lookupErr, existsErr error
+}
+
+func (f *failingRegistry) Lookup(c context.Context, n string) (*registry.Package, error) {
+	if f.lookupErr != nil {
+		return nil, f.lookupErr
+	}
+	return f.fakeRegistry.Lookup(c, n)
+}
+
+func (f *failingRegistry) VersionExists(context.Context, string, string) (bool, error) {
+	return false, f.existsErr
+}
+
+type failingGitHub struct {
+	fakeGitHub
+	err error
+}
+
+func (g *failingGitHub) Resolve(context.Context, github.Ref) (*github.Commit, error) {
+	return nil, g.err
+}
+
+func TestLookupFailuresAreReported(t *testing.T) {
+	netErr := &url.Error{Op: "Get", URL: "https://repo1.maven.org/maven2/g/a/maven-metadata.xml", Err: errors.New("connection refused")}
+	base := &fakeRegistry{eco: versions.Maven, pkgs: map[string][]string{"g:a": {"1.0", "1.1"}}}
+	v := vuln("GHSA-f", versions.Maven, "g:a", rng("i=0", "f=1.0.5"))
+
+	e := &Engine{Registries: map[string]registry.Registry{versions.Maven: &failingRegistry{fakeRegistry: base, lookupErr: netErr}}}
+	fs := e.Run(ctx, v)
+	expectOne(t, fs, IF001, Failed, "could not check: package lookup on repo1.maven.org failed")
+	if len(fs) != 1 {
+		t.Errorf("a failed lookup must not produce other findings:\n%s", dump(fs))
+	}
+
+	e = &Engine{Registries: map[string]registry.Registry{versions.Maven: &failingRegistry{fakeRegistry: base, existsErr: netErr}}}
+	expectOne(t, e.Run(ctx, v), IF002, Failed, "lookup of fixed version 1.0.5 on repo1.maven.org failed")
+
+	// GitHub: a network failure fails the check; a 422 is data (bad SHA).
+	e = &Engine{Registries: map[string]registry.Registry{versions.Maven: base}}
+	fv := vuln("GHSA-g", versions.Maven, "g:a", rng("i=0", "f=1.1"))
+	fv.References = []osv.Reference{{Type: "FIX", URL: "https://github.com/o/r/commit/" + fixSHA}}
+	e.GitHub = &failingGitHub{err: &httpx.StatusError{URL: "https://api.github.com/repos/o/r/commits/x", Status: 503}}
+	expectOne(t, e.Run(ctx, fv), IF005, Failed, "could not check: fetching fix commit")
+	e.GitHub = &failingGitHub{err: &httpx.StatusError{URL: "https://api.github.com/repos/o/r/commits/x", Status: 422}}
+	expectOne(t, e.Run(ctx, fv), IF005, Info, "none of the referenced fix commits or pull requests could be fetched", "HTTP 422")
+}
+
+func TestVER001UnpublishedEndOfEmptyRange(t *testing.T) {
+	reg := &fakeRegistry{eco: versions.Maven, pkgs: map[string][]string{"g:a": {"1.80", "1.81"}}}
+	fs := engine(reg).Run(ctx, vuln("GHSA-e", versions.Maven, "g:a", rng("i=1.70", "f=1.78")))
+	expectOne(t, fs, IF002, Warning, "fixed version 1.78 is not published", "currently matches no published version")
 }

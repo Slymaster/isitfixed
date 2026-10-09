@@ -6,11 +6,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Slymaster/isitfixed/internal/httpx"
 	"github.com/Slymaster/isitfixed/internal/registry"
 	"github.com/Slymaster/isitfixed/internal/versions"
 )
 
-// checkVersions implements VER001: every range version must be published.
+// checkVersions implements IF002: every range version must be published.
 // "Published" means equal under ecosystem ordering to a listed version (so
 // Maven 2.2.0 matches 2.2.0.RELEASE), or confirmed by a per-version lookup
 // (Go pseudo-versions, incomplete Maven metadata).
@@ -33,8 +34,12 @@ func (e *Engine) checkVersions(ctx context.Context, a *advisoryCtx, g *group) {
 			if ok {
 				continue
 			}
+			if httpx.IsFailure(err) {
+				a.add(failure(IF002, g, fmt.Sprintf("lookup of %s version %s", x.kind, x.ver), err))
+				continue
+			}
 			if err != nil && !isNotFound(err) {
-				a.add(Finding{Check: VER001, Severity: Info, Ecosystem: g.Eco, Package: g.Name,
+				a.add(Finding{Check: IF002, Severity: Info, Ecosystem: g.Eco, Package: g.Name,
 					Message: fmt.Sprintf("could not confirm %s version %s: %v", x.kind, x.ver, err)})
 				continue
 			}
@@ -43,12 +48,19 @@ func (e *Engine) checkVersions(ctx context.Context, a *advisoryCtx, g *group) {
 			if x.kind == "fixed" {
 				sev = Error
 			}
-			f := Finding{Check: VER001, Severity: sev, Ecosystem: g.Eco, Package: g.Name,
+			f := Finding{Check: IF002, Severity: sev, Ecosystem: g.Eco, Package: g.Name,
 				Message:  fmt.Sprintf("%s version %s is not published for %s", x.kind, x.ver, g.Name),
 				Evidence: []string{g.Pkg.URL, g.Reg.VersionURL(g.Name, x.ver)}}
 			f.Details = nearest(g, x.ver)
+			movedModule := false
 			if g.Eco == versions.Go {
-				e.explainGo(ctx, g, x.ver, &f)
+				movedModule = e.explainGo(ctx, g, x.ver, &f)
+			}
+			if f.Severity == Error && !movedModule && !coversAny(g, iv) {
+				// The range matches no published version, so the bad
+				// endpoint changes nothing for scanners today.
+				f.Severity = Warning
+				f.Details = append(f.Details, fmt.Sprintf("the range %s currently matches no published version", describe(iv)))
 			}
 			a.add(f)
 		}
@@ -116,10 +128,12 @@ func tagFor(tags []string, v string) string {
 // a /vN path, a module in a subdirectory, CalVer tags). The latter is a
 // widespread convention for applications rather than an error, so it is
 // reported as info.
-func (e *Engine) explainGo(ctx context.Context, g *group, ver string, f *Finding) {
+//
+// It reports true when the version belongs to another module path.
+func (e *Engine) explainGo(ctx context.Context, g *group, ver string, f *Finding) bool {
 	gm, ok := g.Reg.(goModules)
 	if !ok {
-		return
+		return false
 	}
 	major := 0
 	if head, _, _ := strings.Cut(ver, "."); head != "" {
@@ -136,12 +150,12 @@ func (e *Engine) explainGo(ctx context.Context, g *group, ver string, f *Finding
 		if alt != g.Name && gm.ExactVersion(ctx, alt, ver) {
 			f.Message = fmt.Sprintf("%s is not a version of module %s; it is published under module %s", ver, g.Name, alt)
 			f.Evidence = append(f.Evidence, "https://proxy.golang.org/"+registry.EscapePath(alt)+"/@v/v"+ver+".info")
-			return
+			return true
 		}
 	}
 	tl, ok := e.GitHub.(tagLister)
 	if !ok {
-		return
+		return false
 	}
 	repo := ""
 	if parts := strings.Split(g.Name, "/"); len(parts) >= 3 && parts[0] == "github.com" {
@@ -150,11 +164,11 @@ func (e *Engine) explainGo(ctx context.Context, g *group, ver string, f *Finding
 		repo = strings.TrimSuffix(strings.TrimPrefix(u, "https://github.com/"), ".git")
 	}
 	if repo == "" {
-		return
+		return false
 	}
 	tags, err := tl.Tags(ctx, repo)
 	if err != nil {
-		return
+		return false
 	}
 	if t := tagFor(tags, ver); t != "" {
 		f.Severity = Info
@@ -163,9 +177,19 @@ func (e *Engine) explainGo(ctx context.Context, g *group, ver string, f *Finding
 		f.Details = []string{"common for applications whose major version is ≥ 2 without a /vN module path, or whose module lives in a subdirectory; not counted as an error"}
 		f.Evidence = append(f.Evidence, "https://github.com/"+repo+"/releases/tag/"+t)
 	}
+	return false
 }
 
 func kindOf(msg string) string {
 	k, _, _ := strings.Cut(msg, " ")
 	return k
+}
+
+func coversAny(g *group, iv interval) bool {
+	for _, r := range g.Pkg.Releases {
+		if iv.contains(g.Eco, r.Version) {
+			return true
+		}
+	}
+	return false
 }

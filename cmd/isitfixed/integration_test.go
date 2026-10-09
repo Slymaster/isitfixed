@@ -32,21 +32,21 @@ func TestIntegration(t *testing.T) {
 			file: "GHSA-w7c2-w76w-5hmj.json",
 			code: 1,
 			wants: []want{
-				{check.PKG001, check.Error, []string{"github.com/cilium/ciliumCilium was not found"}},
-				{check.XDB001, check.Warning, []string{"GO-2026-6596", "github.com/cilium/ciliumCilium"}},
+				{check.IF001, check.Error, []string{"github.com/cilium/ciliumCilium was not found"}},
+				{check.IF006, check.Warning, []string{"GO-2026-6596", "github.com/cilium/ciliumCilium"}},
 			},
 		},
 		{
 			file: "GHSA-pg5p-wwp8-97g8.json",
 			wants: []want{
-				{check.RNG001, check.Warning, []string{"last_affected 1.10.0", "1.10.1", "1.10.20"}},
+				{check.IF003, check.Warning, []string{"last_affected 1.10.0", "1.10.1", "1.10.20"}},
 			},
 		},
 		{
 			file: "GHSA-2r2v-q399-qq93.json",
 			code: 1,
 			wants: []want{
-				{check.VER001, check.Error, []string{"2.2.10.RELEASE0.5"}},
+				{check.IF002, check.Error, []string{"2.2.10.RELEASE0.5"}},
 			},
 		},
 		{
@@ -56,15 +56,16 @@ func TestIntegration(t *testing.T) {
 			code:  1,
 			extra: []string{"--fix-ref", "https://github.com/quarkusio/quarkus/commit/363d53a82a16b2b7c9de8d968694fd4d93e05062"},
 			wants: []want{
-				{check.VER001, check.Error, []string{"3.35.1.1"}},
-				{check.RNG002, check.Warning, []string{"3.28", "3.29"}},
-				{check.FIX001, check.Warning, []string{"already contain the fix", "3.34.7"}},
+				{check.IF002, check.Error, []string{"3.35.1.1"}},
+				{check.IF004, check.Warning, []string{"3.28", "3.29"}},
+				{check.IF005, check.Warning, []string{"already contain the fix", "3.34.7"}},
 			},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
-			args := append([]string{"--format", "json", "--file", "../../testdata/advisories/" + tc.file}, tc.extra...)
+			// A fresh cache per run so the test really exercises the network.
+			args := append([]string{"--format", "json", "--cache-dir", t.TempDir(), "--file", "../../testdata/advisories/" + tc.file}, tc.extra...)
 			var out, errb bytes.Buffer
 			code := run(append([]string{"check"}, args...), &out, &errb)
 			if code != tc.code {

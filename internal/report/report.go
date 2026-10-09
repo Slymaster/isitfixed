@@ -17,13 +17,16 @@ type Advisory struct {
 	Summary  string          `json:"summary,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Error    string          `json:"error,omitempty"`
+	Skipped  string          `json:"skipped,omitempty"`
 	Findings []check.Finding `json:"findings"`
 }
 
 // Totals counts findings by severity.
 type Totals struct {
 	Advisories int            `json:"advisories"`
-	Failed     int            `json:"failed"`
+	Failed     int            `json:"failed"`  // advisories that could not be read
+	Skipped    int            `json:"skipped"` // withdrawn, malware or unsupported ecosystems
+	NotChecked int            `json:"could_not_check"`
 	Errors     int            `json:"errors"`
 	Warnings   int            `json:"warnings"`
 	Infos      int            `json:"infos"`
@@ -37,8 +40,13 @@ func Count(as []Advisory) Totals {
 		if a.Error != "" {
 			t.Failed++
 		}
+		if a.Skipped != "" {
+			t.Skipped++
+		}
 		for _, f := range a.Findings {
 			switch f.Severity {
+			case check.Failed:
+				t.NotChecked++
 			case check.Error:
 				t.Errors++
 			case check.Warning:
@@ -74,6 +82,10 @@ func JSON(w io.Writer, version string, as []Advisory) error {
 // without findings are listed only when verbose is set.
 func Text(w io.Writer, as []Advisory, verbose bool) {
 	for _, a := range as {
+		if a.Skipped != "" {
+			fmt.Fprintf(w, "%s  skipped: %s\n\n", a.ID, a.Skipped)
+			continue
+		}
 		if len(a.Findings) == 0 && a.Error == "" && !verbose {
 			continue
 		}
@@ -97,7 +109,11 @@ func Text(w io.Writer, as []Advisory, verbose bool) {
 			if f.Confidence != "" {
 				conf = " [" + f.Confidence + " confidence: compiled classes]"
 			}
-			fmt.Fprintf(w, "  %-7s %s  %s%s\n", strings.ToUpper(string(f.Severity)), f.Check, pkg, conf)
+			label := f.Check
+			if f.Slug != "" {
+				label += " " + f.Slug
+			}
+			fmt.Fprintln(w, strings.TrimRight(fmt.Sprintf("  %-7s %s  %s%s", strings.ToUpper(string(f.Severity)), label, pkg, conf), " "))
 			fmt.Fprintf(w, "          %s\n", f.Message)
 			for _, d := range f.Details {
 				fmt.Fprintf(w, "          - %s\n", d)
@@ -121,9 +137,19 @@ func Text(w io.Writer, as []Advisory, verbose bool) {
 		fmt.Fprintln(w)
 	}
 	t := Count(as)
-	fmt.Fprintf(w, "%d advisories checked: %d errors, %d warnings, %d info", t.Advisories, t.Errors, t.Warnings, t.Infos)
+	noun := "advisories"
+	if t.Advisories == 1 {
+		noun = "advisory"
+	}
+	fmt.Fprintf(w, "%d %s checked: %d errors, %d warnings, %d info", t.Advisories, noun, t.Errors, t.Warnings, t.Infos)
+	if t.NotChecked > 0 {
+		fmt.Fprintf(w, ", %d could not be checked (exit status 2)", t.NotChecked)
+	}
 	if t.Failed > 0 {
-		fmt.Fprintf(w, ", %d could not be checked", t.Failed)
+		fmt.Fprintf(w, ", %d could not be read", t.Failed)
+	}
+	if t.Skipped > 0 {
+		fmt.Fprintf(w, ", %d skipped", t.Skipped)
 	}
 	fmt.Fprintln(w)
 }

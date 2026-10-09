@@ -179,7 +179,7 @@ func expectOne(t *testing.T, fs []Finding, check string, sev Severity, contains 
 	return match[0]
 }
 
-// fakeGoRegistry adds the Go-specific lookups used by VER001.
+// fakeGoRegistry adds the Go-specific lookups used by IF002.
 type fakeGoRegistry struct {
 	*fakeRegistry
 	modules map[string][]string // other module paths -> versions

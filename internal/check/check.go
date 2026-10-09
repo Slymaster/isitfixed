@@ -20,6 +20,9 @@ type Severity string
 
 // Severities.
 const (
+	// Failed means the check could not be completed (network or API
+	// failure); the run exits with status 2.
+	Failed  Severity = "failed"
 	Error   Severity = "error"
 	Warning Severity = "warning"
 	Info    Severity = "info"
@@ -27,31 +30,55 @@ const (
 
 func (s Severity) rank() int {
 	switch s {
-	case Error:
+	case Failed:
 		return 0
-	case Warning:
+	case Error:
 		return 1
+	case Warning:
+		return 2
 	}
-	return 2
+	return 3
 }
 
-// Check IDs.
+// Check IDs. The IF prefix avoids confusion with osv-linter's rule IDs.
 const (
-	PKG001 = "PKG001"
-	VER001 = "VER001"
-	RNG001 = "RNG001"
-	RNG002 = "RNG002"
-	FIX001 = "FIX001"
-	XDB001 = "XDB001"
+	IF001 = "IF001"
+	IF002 = "IF002"
+	IF003 = "IF003"
+	IF004 = "IF004"
+	IF005 = "IF005"
+	IF006 = "IF006"
 )
 
 // AllChecks lists every check ID.
-var AllChecks = []string{PKG001, VER001, RNG001, RNG002, FIX001, XDB001}
+var AllChecks = []string{IF001, IF002, IF003, IF004, IF005, IF006}
+
+// Slugs are readable names for the check IDs.
+var Slugs = map[string]string{
+	IF001: "package-missing",
+	IF002: "version-missing",
+	IF003: "stale-last-affected",
+	IF004: "uncovered-release-line",
+	IF005: "fix-content",
+	IF006: "cross-database",
+}
+
+// ParseCheck accepts a check ID ("IF004") or slug ("uncovered-release-line").
+func ParseCheck(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	for id, slug := range Slugs {
+		if strings.EqualFold(s, id) || strings.EqualFold(s, slug) {
+			return id, true
+		}
+	}
+	return "", false
+}
 
 // Finding is one result.
 type Finding struct {
 	Advisory  string   `json:"advisory"`
 	Check     string   `json:"check"`
+	Slug      string   `json:"slug"`
 	Severity  Severity `json:"severity"`
 	Ecosystem string   `json:"ecosystem,omitempty"`
 	Package   string   `json:"package,omitempty"`
@@ -72,11 +99,11 @@ type OSVSource interface {
 // Engine runs checks.
 type Engine struct {
 	Registries map[string]registry.Registry
-	GitHub     fix.Fetcher // nil disables FIX001
-	OSV        OSVSource   // nil disables XDB001 and alias-based fix discovery
+	GitHub     fix.Fetcher // nil disables IF005
+	OSV        OSVSource   // nil disables IF006 and alias-based fix discovery
 	// ExtraFixRefs are commit/PR URLs supplied by the user (--fix-ref).
 	ExtraFixRefs []string
-	// MaxArtifacts bounds artifact inspections per package (FIX001).
+	// MaxArtifacts bounds artifact inspections per package (IF005).
 	MaxArtifacts int
 	// Enabled restricts checks (nil = all).
 	Enabled map[string]bool
@@ -168,7 +195,7 @@ type group struct {
 	Explicit  []string
 	Pkg       *registry.Package
 	Reg       registry.Registry
-	missing   map[string]bool // range versions VER001 found unpublished
+	missing   map[string]bool // range versions IF002 found unpublished
 }
 
 func (g *group) covered(v string) bool {
@@ -220,12 +247,13 @@ type advisoryCtx struct {
 	groups   []*group
 	aliases  []*osv.Vuln
 	findings []Finding
-	// pending range findings that FIX001 evidence may confirm or downgrade.
+	// pending range findings that IF005 evidence may confirm or downgrade.
 	rng []*rngCandidate
 }
 
 func (a *advisoryCtx) add(f Finding) {
 	f.Advisory = a.v.ID
+	f.Slug = Slugs[f.Check]
 	a.findings = append(a.findings, f)
 }
 
@@ -240,24 +268,28 @@ func (e *Engine) Run(ctx context.Context, v *osv.Vuln) []Finding {
 		if g.Reg == nil {
 			continue
 		}
-		if e.on(PKG001) || e.on(VER001) || e.on(RNG001) || e.on(RNG002) || e.on(FIX001) || e.on(XDB001) {
+		if e.on(IF001) || e.on(IF002) || e.on(IF003) || e.on(IF004) || e.on(IF005) || e.on(IF006) {
 			e.checkPackage(ctx, a, g)
 		}
 	}
-	if e.OSV != nil && (e.on(XDB001) || e.on(FIX001)) {
-		a.aliases = e.fetchAliases(ctx, v)
+	if e.OSV != nil && (e.on(IF006) || e.on(IF005)) {
+		var err error
+		a.aliases, err = e.fetchAliases(ctx, v)
+		if err != nil {
+			a.add(failure(IF006, nil, "alias lookup", err))
+		}
 	}
 	for _, g := range a.groups {
 		if g.Pkg == nil || g.Pkg.Unpublished {
 			continue
 		}
-		if e.on(VER001) {
+		if e.on(IF002) {
 			e.checkVersions(ctx, a, g)
 		}
-		if e.on(RNG001) || e.on(RNG002) {
+		if e.on(IF003) || e.on(IF004) {
 			e.rangeCandidates(ctx, a, g)
 		}
-		if e.on(FIX001) && e.GitHub != nil {
+		if e.on(IF005) && e.GitHub != nil {
 			e.checkFix(ctx, a, g)
 		}
 	}
@@ -266,7 +298,7 @@ func (e *Engine) Run(ctx context.Context, v *osv.Vuln) []Finding {
 			a.add(c.finding())
 		}
 	}
-	if e.on(XDB001) && e.OSV != nil {
+	if e.on(IF006) && e.OSV != nil {
 		e.checkCrossDB(ctx, a)
 	}
 	sortFindings(a.findings)
@@ -287,20 +319,22 @@ func sortFindings(fs []Finding) {
 
 func isNotFound(err error) bool { return errors.Is(err, httpx.ErrNotFound) }
 
-// checkPackage implements PKG001 and loads registry metadata.
+// checkPackage implements IF001 and loads registry metadata.
 func (e *Engine) checkPackage(ctx context.Context, a *advisoryCtx, g *group) {
 	p, err := g.Reg.Lookup(ctx, g.Name)
 	if err == nil {
 		g.Pkg = p
-		if p.Unpublished && e.on(PKG001) {
-			a.add(Finding{Check: PKG001, Severity: Info, Ecosystem: g.Eco, Package: g.Name,
+		if p.Unpublished && e.on(IF001) {
+			a.add(Finding{Check: IF001, Severity: Info, Ecosystem: g.Eco, Package: g.Name,
 				Message: "package exists but " + p.Note + "; version checks skipped", Evidence: []string{p.URL}})
 		}
 		return
 	}
 	if !isNotFound(err) {
-		if e.on(PKG001) {
-			a.add(Finding{Check: PKG001, Severity: Info, Ecosystem: g.Eco, Package: g.Name,
+		if httpx.IsFailure(err) {
+			a.add(failure(IF001, g, "package lookup", err))
+		} else if e.on(IF001) {
+			a.add(Finding{Check: IF001, Severity: Info, Ecosystem: g.Eco, Package: g.Name,
 				Message: "could not look up package: " + err.Error()})
 		}
 		return
@@ -312,9 +346,14 @@ func (e *Engine) checkPackage(ctx context.Context, a *advisoryCtx, g *group) {
 			if ver == "" || ver == "0" {
 				continue
 			}
-			if ok, _ := g.Reg.VersionExists(ctx, g.Name, ver); ok {
-				if e.on(PKG001) {
-					a.add(Finding{Check: PKG001, Severity: Info, Ecosystem: g.Eco, Package: g.Name,
+			ok, verr := g.Reg.VersionExists(ctx, g.Name, ver)
+			if httpx.IsFailure(verr) {
+				a.add(failure(IF001, g, "package lookup", verr))
+				return
+			}
+			if ok {
+				if e.on(IF001) {
+					a.add(Finding{Check: IF001, Severity: Info, Ecosystem: g.Eco, Package: g.Name,
 						Message:  fmt.Sprintf("registry has no version listing for the package, but version %s exists; other checks skipped", ver),
 						Evidence: []string{g.Reg.VersionURL(g.Name, ver)}})
 				}
@@ -322,10 +361,10 @@ func (e *Engine) checkPackage(ctx context.Context, a *advisoryCtx, g *group) {
 			}
 		}
 	}
-	if !e.on(PKG001) {
+	if !e.on(IF001) {
 		return
 	}
-	f := Finding{Check: PKG001, Severity: Error, Ecosystem: g.Eco, Package: g.Name,
+	f := Finding{Check: IF001, Severity: Error, Ecosystem: g.Eco, Package: g.Name,
 		Message:  fmt.Sprintf("package %s was not found on %s", g.Name, registryName(g)),
 		Evidence: []string{g.Reg.PackageURL(g.Name)}}
 	for _, o := range a.groups {
@@ -382,4 +421,20 @@ func registryName(g *group) string {
 		return "crates.io"
 	}
 	return g.Eco
+}
+
+// failure builds a "could not check" result for a lookup that failed after
+// retries. It names the host that failed and makes the run exit 2; the
+// check itself is not reported as passed or downgraded.
+func failure(check string, g *group, what string, err error) Finding {
+	host := httpx.FailedHost(err)
+	msg := fmt.Sprintf("could not check: %s failed", what)
+	if host != "" {
+		msg = fmt.Sprintf("could not check: %s on %s failed", what, host)
+	}
+	f := Finding{Check: check, Severity: Failed, Message: msg, Details: []string{err.Error()}}
+	if g != nil {
+		f.Ecosystem, f.Package = g.Eco, g.Name
+	}
+	return f
 }

@@ -12,7 +12,7 @@ import (
 	"github.com/Slymaster/isitfixed/internal/versions"
 )
 
-// rngCandidate is a range-shape finding that FIX001 evidence may confirm
+// rngCandidate is a range-shape finding that IF005 evidence may confirm
 // (fix absent from the probed version) or downgrade (fix present).
 type rngCandidate struct {
 	check     string
@@ -26,9 +26,9 @@ type rngCandidate struct {
 	// newest of them, is inspected first.
 	uncovered []string
 	probe     string
-	// keep is the interval to rewrite when the fix appears mid-way (RNG001).
+	// keep is the interval to rewrite when the fix appears mid-way (IF003).
 	intro string
-	// filled by FIX001
+	// filled by IF005
 	partialFix  bool
 	probed      bool
 	result      fix.Result
@@ -84,7 +84,7 @@ func (c *rngCandidate) finding() Finding {
 			f.Evidence = append(f.Evidence, c.earliestURL)
 		}
 		start := c.intro
-		if c.check == RNG002 {
+		if c.check == IF004 {
 			start = c.uncovered[0]
 		}
 		f.Suggested = [][]osv.Event{{{Introduced: start}, {Fixed: c.earliest}}}
@@ -121,11 +121,11 @@ func lines(g *group) []*line {
 func (l *line) first() string { return l.releases[0] }
 func (l *line) last() string  { return l.releases[len(l.releases)-1] }
 
-// rangeCandidates implements RNG001 (stale last_affected) and RNG002
+// rangeCandidates implements IF003 (stale last_affected) and IF004
 // (uncovered release line between ranges).
 func (e *Engine) rangeCandidates(ctx context.Context, a *advisoryCtx, g *group) {
 	ls := lines(g)
-	if e.on(RNG001) {
+	if e.on(IF003) {
 		for _, iv := range g.Intervals {
 			if iv.LastAffected == "" || g.missing[iv.LastAffected] {
 				continue
@@ -158,7 +158,7 @@ func (e *Engine) rangeCandidates(ctx context.Context, a *advisoryCtx, g *group) 
 				sev = Warning
 			}
 			newest := later[len(later)-1]
-			c := &rngCandidate{check: RNG001, g: g, sev: sev, probe: newest, uncovered: later, intro: iv.Intro,
+			c := &rngCandidate{check: IF003, g: g, sev: sev, probe: newest, uncovered: later, intro: iv.Intro,
 				message: fmt.Sprintf("range ends with last_affected %s, but %d later %s.x version(s) were published and are not covered by any range: %s",
 					iv.LastAffected, len(later), lk, compact(later)),
 				evidence:  []string{g.Pkg.URL},
@@ -172,7 +172,7 @@ func (e *Engine) rangeCandidates(ctx context.Context, a *advisoryCtx, g *group) 
 			a.rng = append(a.rng, c)
 		}
 	}
-	if !e.on(RNG002) || len(g.Intervals) < 2 {
+	if !e.on(IF004) || len(g.Intervals) < 2 {
 		return
 	}
 	// A line is a gap when no version of it is covered, some range ends at
@@ -220,7 +220,7 @@ func (e *Engine) rangeCandidates(ctx context.Context, a *advisoryCtx, g *group) 
 			sev = Info
 			details = []string{fmt.Sprintf("a range of this package is introduced mid-line (%s), which suggests the vulnerable code arrived through patch releases; these lines may never have had it", mid)}
 		}
-		a.rng = append(a.rng, &rngCandidate{check: RNG002, g: g, sev: sev, probe: last, uncovered: vs,
+		a.rng = append(a.rng, &rngCandidate{check: IF004, g: g, sev: sev, probe: last, uncovered: vs,
 			message: fmt.Sprintf("release line(s) %s (%d versions: %s) lie between affected ranges (after the range ending at %s, before the one introduced at %s) and no version of them is covered",
 				strings.Join(keys, ", "), len(vs), compact(vs), run[0].end, run[0].next),
 			details:   details,

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Slymaster/isitfixed/internal/httpx"
 	"github.com/Slymaster/isitfixed/internal/osv"
 	"github.com/Slymaster/isitfixed/internal/versions"
 )
@@ -18,7 +19,17 @@ const maxAliasRecords = 6
 // this advisory (e.g. GO-*, RUSTSEC-*, PYSEC-*). osv.dev computes alias
 // groups, so the record fetched from the API usually lists more aliases than
 // the file itself.
-func (e *Engine) fetchAliases(ctx context.Context, v *osv.Vuln) []*osv.Vuln {
+//
+// The error is the first osv.dev request that failed after retries.
+func (e *Engine) fetchAliases(ctx context.Context, v *osv.Vuln) ([]*osv.Vuln, error) {
+	var failErr error
+	get := func(id string) (*osv.Vuln, error) {
+		rec, err := e.OSV.Get(ctx, id)
+		if httpx.IsFailure(err) && failErr == nil {
+			failErr = err
+		}
+		return rec, err
+	}
 	ids := map[string]bool{}
 	var order []string
 	addIDs := func(xs []string) {
@@ -30,12 +41,12 @@ func (e *Engine) fetchAliases(ctx context.Context, v *osv.Vuln) []*osv.Vuln {
 		}
 	}
 	addIDs(v.Aliases)
-	if rec, err := e.OSV.Get(ctx, v.ID); err == nil {
+	if rec, err := get(v.ID); err == nil {
 		addIDs(rec.Aliases)
 	}
 	for _, id := range append([]string(nil), order...) {
 		if strings.HasPrefix(id, "CVE-") {
-			if rec, err := e.OSV.Get(ctx, id); err == nil {
+			if rec, err := get(id); err == nil {
 				addIDs(rec.Aliases)
 			}
 		}
@@ -45,7 +56,7 @@ func (e *Engine) fetchAliases(ctx context.Context, v *osv.Vuln) []*osv.Vuln {
 		if strings.HasPrefix(id, "CVE-") || strings.HasPrefix(id, "GHSA-") || len(out) >= maxAliasRecords {
 			continue
 		}
-		rec, err := e.OSV.Get(ctx, id)
+		rec, err := get(id)
 		if err != nil || rec.Withdrawn != "" {
 			continue
 		}
@@ -59,10 +70,10 @@ func (e *Engine) fetchAliases(ctx context.Context, v *osv.Vuln) []*osv.Vuln {
 			out = append(out, rec)
 		}
 	}
-	return out
+	return out, failErr
 }
 
-// checkCrossDB implements XDB001: compare which published versions each
+// checkCrossDB implements IF006: compare which published versions each
 // record marks affected, per package, and spot package names spelled
 // differently.
 func (e *Engine) checkCrossDB(ctx context.Context, a *advisoryCtx) {
@@ -106,13 +117,13 @@ func (e *Engine) checkCrossDB(ctx context.Context, a *advisoryCtx) {
 				} else {
 					continue
 				}
-				f := Finding{Check: XDB001, Severity: Warning, Ecosystem: mine.Eco, Package: mine.Name,
+				f := Finding{Check: IF006, Severity: Warning, Ecosystem: mine.Eco, Package: mine.Name,
 					Message: msg,
 					Details: []string{fmt.Sprintf("this advisory's ranges for %s: %s; %s ranges for %s: %s",
 						mine.Name, describeAll(mine), al.ID, og.Name, describeAll(og))},
 					Evidence: []string{osv.URL(al.ID)}}
 				if mine.Pkg == nil {
-					f.Details = append(f.Details, mine.Name+" does not exist in the registry (see PKG001)")
+					f.Details = append(f.Details, mine.Name+" does not exist in the registry (see IF001)")
 				}
 				a.add(f)
 			}
@@ -141,7 +152,7 @@ func (e *Engine) checkCrossDB(ctx context.Context, a *advisoryCtx) {
 			if len(onlyMine) == 0 && len(onlyOther) == 0 {
 				continue
 			}
-			f := Finding{Check: XDB001, Severity: Warning, Ecosystem: g.Eco, Package: g.Name,
+			f := Finding{Check: IF006, Severity: Warning, Ecosystem: g.Eco, Package: g.Name,
 				Message:  fmt.Sprintf("%s and this advisory disagree on which published versions of %s are affected", al.ID, g.Name),
 				Evidence: []string{osv.URL(al.ID), g.Pkg.URL}}
 			if len(onlyOther) > 0 {

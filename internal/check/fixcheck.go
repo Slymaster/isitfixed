@@ -2,13 +2,13 @@ package check
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/Slymaster/isitfixed/internal/fix"
 	"github.com/Slymaster/isitfixed/internal/github"
+	"github.com/Slymaster/isitfixed/internal/httpx"
 	"github.com/Slymaster/isitfixed/internal/osv"
 	"github.com/Slymaster/isitfixed/internal/registry"
 	"github.com/Slymaster/isitfixed/internal/versions"
@@ -60,6 +60,8 @@ type prober struct {
 	lowConf bool
 	// groupSeen[i]: commit group i was applicable to some inspected artifact.
 	groupSeen []bool
+	// failErr is the first artifact download that failed after retries.
+	failErr error
 }
 
 // probe inspects one published version (exact release string). It returns
@@ -87,6 +89,9 @@ func (p *prober) probe(v string) *probeRes {
 		}
 	} else {
 		r.res.Status = fix.Inapplicable
+		if httpx.IsFailure(r.err) && p.failErr == nil {
+			p.failErr = r.err
+		}
 	}
 	p.results[v] = r
 	return r
@@ -162,9 +167,9 @@ func (e *Engine) fixRefs(a *advisoryCtx) []github.Ref {
 	return out
 }
 
-// checkFix implements FIX001.
+// checkFix implements IF005.
 func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
-	base := Finding{Check: FIX001, Severity: Info, Ecosystem: g.Eco, Package: g.Name}
+	base := Finding{Check: IF005, Severity: Info, Ecosystem: g.Eco, Package: g.Name}
 	info := func(msg string, details ...string) {
 		f := base
 		f.Message, f.Details = msg, details
@@ -177,27 +182,35 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 	}
 	var sets []*fix.Set
 	var notes []string
+	fetched := 0
 	for _, r := range refs {
 		c, err := e.GitHub.Resolve(ctx, r)
-		if err != nil {
-			if errors.Is(err, github.ErrUnmerged) || isNotFound(err) {
-				notes = append(notes, fmt.Sprintf("%s: %v", r.URL, err))
-			} else {
-				notes = append(notes, fmt.Sprintf("%s: could not fetch: %v", r.URL, err))
+		if err == nil {
+			var s *fix.Set
+			if s, err = fix.Extract(ctx, e.GitHub, c); err == nil {
+				fetched++
+				if len(s.Units) < fix.MinUnits {
+					notes = append(notes, fmt.Sprintf("%s: no distinctive added or removed source lines", r.URL))
+					continue
+				}
+				if debug {
+					for _, u := range s.Units {
+						fmt.Fprintf(os.Stderr, "[debug] %s %s: %s\n", c.SHA[:10], u.File, u.Line)
+					}
+				}
+				sets = append(sets, s)
+				continue
 			}
-			continue
 		}
-		s := fix.Extract(ctx, e.GitHub, c)
-		if len(s.Units) < fix.MinUnits {
-			notes = append(notes, fmt.Sprintf("%s: no distinctive added source lines", r.URL))
-			continue
+		if httpx.IsFailure(err) {
+			a.add(failure(IF005, g, "fetching fix commit "+r.URL, err))
+			return
 		}
-		if debug {
-			for _, u := range s.Units {
-				fmt.Fprintf(os.Stderr, "[debug] %s %s: %s\n", c.SHA[:10], u.File, u.Line)
-			}
-		}
-		sets = append(sets, s)
+		notes = append(notes, fmt.Sprintf("%s: could not be fetched: %v", r.URL, err))
+	}
+	if fetched == 0 {
+		info("unverifiable: none of the referenced fix commits or pull requests could be fetched", notes...)
+		return
 	}
 	sets, dropped := fix.Superseded(sets)
 	notes = append(notes, dropped...)
@@ -210,6 +223,11 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 		budget = DefaultMaxArtifacts
 	}
 	p := &prober{ctx: ctx, g: g, sets: sets, results: map[string]*probeRes{}, seen: map[string]bool{}, budget: budget}
+	defer func() {
+		if p.failErr != nil {
+			a.add(failure(IF005, g, "artifact download", p.failErr))
+		}
+	}()
 
 	exact := func(v string) (string, bool) {
 		r, ok := g.Pkg.Find(v)
@@ -274,15 +292,35 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 	}
 	if !anchored() {
 		var ds []string
-		for _, r := range p.results {
+		var best *probeRes
+		applicable := 0
+		for _, v := range g.Pkg.Versions() {
+			r, ok := p.results[v]
+			if !ok {
+				continue
+			}
 			if r.err != nil {
 				ds = append(ds, fmt.Sprintf("%s: %v", r.version, r.err))
-			} else {
-				ds = append(ds, r.summary())
+				continue
+			}
+			ds = append(ds, r.summary())
+			if r.res.Status != fix.Inapplicable {
+				applicable++
+			}
+			if r.res.Status == fix.Partial && (best == nil || r.res.Fraction() > best.res.Fraction()) {
+				best = r
 			}
 		}
 		ds = append(ds, notes...)
-		info(fmt.Sprintf("unverifiable: the fix's distinctive lines were not found in any of the %d inspected version(s)", len(p.results)), ds...)
+		switch {
+		case best != nil:
+			info(fmt.Sprintf("inconclusive: no inspected version clearly contains the fix (best match %s: %d/%d distinctive lines)",
+				best.version, best.res.Present, best.res.Applicable), ds...)
+		case applicable == 0:
+			info(fmt.Sprintf("unverifiable: the files changed by the fix were not found in any of the %d inspected artifact(s)", len(p.results)), ds...)
+		default:
+			info(fmt.Sprintf("unverifiable: none of the %d inspected version(s) contains the fix's distinctive lines", len(p.results)), ds...)
+		}
 		return
 	}
 
@@ -410,7 +448,7 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 			outside, len(p.groupSeen))
 		for i := range a.findings {
 			f := &a.findings[i]
-			if f.Check == FIX001 && f.Package == g.Name && f.Severity == Warning {
+			if f.Check == IF005 && f.Package == g.Name && f.Severity == Warning {
 				f.Severity = Info
 				f.Details = append(f.Details, note)
 				f.Suggested = nil
@@ -456,7 +494,7 @@ func (e *Engine) checkFix(ctx context.Context, a *advisoryCtx, g *group) {
 	}
 	if conf != "" {
 		for i := range a.findings {
-			if a.findings[i].Check == FIX001 && a.findings[i].Package == g.Name {
+			if a.findings[i].Check == IF005 && a.findings[i].Package == g.Name {
 				a.findings[i].Confidence = conf
 			}
 		}

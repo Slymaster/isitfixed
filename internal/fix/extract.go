@@ -206,7 +206,11 @@ func classTokens(line string, parent []byte) []string {
 // occurs anywhere in the post-fix file; its presence in an artifact means
 // the fix is absent. Removed lines matter for fixes that mostly delete code
 // (e.g. dropping a secret from a log statement).
-func Extract(ctx context.Context, f Fetcher, c *github.Commit) *Set {
+//
+// A raw-file fetch that fails (network, rate limit) aborts with an error:
+// silently skipping the pre-fix comparison would change which lines count
+// as distinctive.
+func Extract(ctx context.Context, f Fetcher, c *github.Commit) (*Set, error) {
 	s := &Set{Commit: c, Added: map[string]bool{}}
 	removedAll := map[string]bool{}
 	addedAll := map[string]bool{}
@@ -245,6 +249,9 @@ func Extract(ctx context.Context, f Fetcher, c *github.Commit) *Set {
 				pp = fl.PreviousPath
 			}
 			b, err := f.RawFile(ctx, c.Repo, c.Parent, pp)
+			if httpx.IsFailure(err) {
+				return nil, err
+			}
 			if err == nil {
 				parent = b
 			} else if err == httpx.ErrNotFound && fl.Status != "renamed" {
@@ -268,6 +275,9 @@ func Extract(ctx context.Context, f Fetcher, c *github.Commit) *Set {
 			continue
 		}
 		post, err := f.RawFile(ctx, c.Repo, c.SHA, fl.Path)
+		if httpx.IsFailure(err) {
+			return nil, err
+		}
 		if err != nil {
 			continue
 		}
@@ -284,7 +294,7 @@ func Extract(ctx context.Context, f Fetcher, c *github.Commit) *Set {
 	}
 	s.Units = pick(files, perFile, MaxUnits)
 	s.Units = append(s.Units, pick(files, perFileRem, MaxRemovedUnits)...)
-	return s
+	return s, nil
 }
 
 // MaxRemovedUnits bounds the number of distinctive removed lines per commit.

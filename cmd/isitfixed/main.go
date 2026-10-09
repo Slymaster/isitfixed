@@ -49,6 +49,9 @@ Usage:
 Flags for check:
 `
 
+// testHook lets tests replace network clients.
+var testHook func(*check.Engine, *osv.API)
+
 type multi []string
 
 func (m *multi) String() string     { return strings.Join(*m, ",") }
@@ -103,18 +106,20 @@ func newFlags(out io.Writer) *flags {
 	f.fs.StringVar(&f.ecosystem, "ecosystem", "", "only check advisories with a package in this `ecosystem` (Go, npm, Maven, crates.io)")
 	f.fs.IntVar(&f.concurrency, "concurrency", 4, "advisories checked in parallel")
 	f.fs.StringVar(&f.format, "format", "text", "output `format`: text or json")
-	f.fs.Var(&f.fixRefs, "fix-ref", "extra fix commit or pull request `URL` used by FIX001 (repeatable)")
+	f.fs.Var(&f.fixRefs, "fix-ref", "extra fix commit or pull request `URL` used by IF005 (repeatable)")
 	f.fs.StringVar(&f.checks, "checks", "", "comma-separated check `IDs` to run (default: all)")
 	f.fs.StringVar(&f.cacheDir, "cache-dir", "", "cache `directory` (default: <user cache dir>/isitfixed)")
 	f.fs.BoolVar(&f.noCache, "no-cache", false, "do not read or write the on-disk cache")
 	f.fs.StringVar(&f.minSev, "min-severity", "info", "hide findings below this `severity` (info, warning, error)")
-	f.fs.IntVar(&f.maxArt, "max-artifacts", check.DefaultMaxArtifacts, "maximum artifacts inspected per package by FIX001")
+	f.fs.IntVar(&f.maxArt, "max-artifacts", check.DefaultMaxArtifacts, "maximum artifacts inspected per package by IF005")
 	f.fs.BoolVar(&f.verbose, "v", false, "text output: also list advisories without findings")
 	return f
 }
 
 func sevRank(s check.Severity) int {
 	switch s {
+	case check.Failed:
+		return 3
 	case check.Error:
 		return 2
 	case check.Warning:
@@ -154,24 +159,30 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "isitfixed check: --min-severity must be info, warning or error")
 		return 2
 	}
-	if f.ecosystem != "" && !versions.Supported(f.ecosystem) {
-		fmt.Fprintf(stderr, "isitfixed check: unsupported ecosystem %q (supported: Go, npm, Maven, crates.io)\n", f.ecosystem)
-		return 2
+	if f.ecosystem != "" {
+		eco, ok := versions.Canonical(f.ecosystem)
+		if !ok {
+			fmt.Fprintf(stderr, "isitfixed check: unsupported ecosystem %q (supported: Go, npm, Maven, crates.io)\n", f.ecosystem)
+			return 2
+		}
+		f.ecosystem = eco
+	}
+	for _, id := range ids {
+		if !osv.ValidID(id) {
+			fmt.Fprintf(stderr, "isitfixed check: invalid advisory ID %q\n", id)
+			return 2
+		}
 	}
 	var enabled map[string]bool
 	if f.checks != "" {
 		enabled = map[string]bool{}
 		for _, c := range strings.Split(f.checks, ",") {
-			c = strings.ToUpper(strings.TrimSpace(c))
-			known := false
-			for _, k := range check.AllChecks {
-				known = known || k == c
-			}
-			if !known {
-				fmt.Fprintf(stderr, "isitfixed check: unknown check %q\n", c)
+			id, ok := check.ParseCheck(c)
+			if !ok {
+				fmt.Fprintf(stderr, "isitfixed check: unknown check %q (use an ID such as IF004 or a slug such as uncovered-release-line)\n", strings.TrimSpace(c))
 				return 2
 			}
-			enabled[c] = true
+			enabled[id] = true
 		}
 	}
 
@@ -204,8 +215,14 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 		MaxArtifacts: f.maxArt,
 		Enabled:      enabled,
 	}
+	if testHook != nil {
+		testHook(eng, api)
+	}
 
-	type job struct{ id, path string }
+	type job struct {
+		id, path string
+		dir      bool // found by --dir
+	}
 	var jobs []job
 	for _, id := range ids {
 		jobs = append(jobs, job{id: id})
@@ -220,13 +237,14 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		for _, p := range ps {
-			jobs = append(jobs, job{path: p})
+			jobs = append(jobs, job{path: p, dir: true})
 		}
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	results := make([]*report.Advisory, len(jobs))
+	var skipped atomic.Int32
 	n := f.concurrency
 	if n < 1 {
 		n = 1
@@ -261,13 +279,18 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 				}
 			}
 			if err != nil {
-				if j.path != "" && f.dir != "" {
-					return // not an OSV file; skip silently in directory scans
+				if j.dir {
+					skipped.Add(1) // directory scans skip non-OSV and malformed files
+					return
 				}
 				results[i] = &report.Advisory{ID: strings.TrimSuffix(filepath.Base(src), ".json"), Source: src, Error: err.Error()}
 				return
 			}
 			if f.ecosystem != "" && !v.HasEcosystem(f.ecosystem) {
+				return
+			}
+			if reason := skipReason(v); reason != "" {
+				results[i] = &report.Advisory{ID: v.ID, Summary: v.Summary, Source: src, Skipped: reason}
 				return
 			}
 			fs := eng.Run(ctx, v)
@@ -276,7 +299,7 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 				if f.ecosystem != "" && x.Ecosystem != "" && !strings.EqualFold(x.Ecosystem, f.ecosystem) {
 					continue
 				}
-				if sevRank(x.Severity) >= sevRank(minSev) {
+				if x.Severity == check.Failed || sevRank(x.Severity) >= sevRank(minSev) {
 					kept = append(kept, x)
 				}
 			}
@@ -289,17 +312,33 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	}
 
 	var out []report.Advisory
-	failed := false
+	errorFinding, runtimeFailure := false, false
+	checked := 0
 	for _, r := range results {
 		if r == nil {
 			continue
 		}
 		out = append(out, *r)
+		if r.Error != "" {
+			runtimeFailure = true
+		} else if r.Skipped == "" {
+			checked++
+		}
 		for _, x := range r.Findings {
-			if x.Severity == check.Error {
-				failed = true
+			switch x.Severity {
+			case check.Error:
+				errorFinding = true
+			case check.Failed:
+				runtimeFailure = true
 			}
 		}
+	}
+	if n := skipped.Load(); n > 0 {
+		fmt.Fprintf(stderr, "isitfixed: skipped %d file(s) under %s that are not valid OSV records\n", n, f.dir)
+	}
+	if f.dir != "" && checked == 0 && len(ids) == 0 && len(f.files) == 0 {
+		fmt.Fprintf(stderr, "isitfixed: no checkable OSV record found under %s\n", f.dir)
+		runtimeFailure = true
 	}
 	if f.format == "json" {
 		if err := report.JSON(stdout, toolVersion(), out); err != nil {
@@ -309,8 +348,37 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	} else {
 		report.Text(stdout, out, f.verbose)
 	}
-	if failed {
+	switch {
+	case runtimeFailure:
+		return 2
+	case errorFinding:
 		return 1
 	}
 	return 0
+}
+
+// skipReason explains why an advisory is not checked, or returns "".
+func skipReason(v *osv.Vuln) string {
+	switch {
+	case v.Withdrawn != "":
+		return "withdrawn"
+	case v.IsMalware():
+		return "malicious-package report, not a vulnerability range"
+	}
+	var other []string
+	seen := map[string]bool{}
+	for _, a := range v.Affected {
+		eco := a.Package.Ecosystem
+		if versions.Supported(eco) {
+			return ""
+		}
+		if !seen[eco] {
+			seen[eco] = true
+			other = append(other, eco)
+		}
+	}
+	if len(other) == 0 {
+		return "no affected packages"
+	}
+	return "no package in a supported ecosystem (" + strings.Join(other, ", ") + ")"
 }

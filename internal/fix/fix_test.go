@@ -114,7 +114,7 @@ func testCommit() (*github.Commit, fakeFetcher) {
 
 func TestExtract(t *testing.T) {
 	c, f := testCommit()
-	s := Extract(context.Background(), f, c)
+	s, _ := Extract(context.Background(), f, c)
 	var added, removed []string
 	for _, u := range s.Units {
 		if u.Removed {
@@ -160,7 +160,7 @@ func goArtifact(body string) *registry.Artifact {
 
 func TestMatchStatuses(t *testing.T) {
 	c, f := testCommit()
-	s := Extract(context.Background(), f, c)
+	s, _ := Extract(context.Background(), f, c)
 	sets := []*Set{s}
 
 	if r := Match(sets, goArtifact(postGo), map[string]bool{}); r.Status != Contains || r.Present != r.Applicable {
@@ -195,7 +195,7 @@ func TestMatchPathMapping(t *testing.T) {
 		Patch: "+    public static String pathWithoutMatrixParams(String path) {\n+        return stripMatrixParameters(path, ';');\n",
 	}}}
 	f := fakeFetcher{"pre:extensions/vertx-http/runtime/src/main/java/io/q/HttpSecurityUtils.java": "class HttpSecurityUtils {}"}
-	s := Extract(context.Background(), f, c)
+	s, _ := Extract(context.Background(), f, c)
 	if len(s.Units) != 2 {
 		t.Fatalf("units = %+v", s.Units)
 	}
@@ -240,7 +240,7 @@ func TestAddedFileAbsentInOldVersion(t *testing.T) {
 		Path: "src/sanitize.rs", Status: "added",
 		Patch: "+pub fn sanitize_header_value(v: &str) -> String {\n+    v.replace(['\\r', '\\n'], \"\")\n+}\n",
 	}}}
-	s := Extract(context.Background(), fakeFetcher{}, c)
+	s, _ := Extract(context.Background(), fakeFetcher{}, c)
 	seen := map[string]bool{}
 	fixed := registry.NewMemArtifact("mem://new.crate", "source", map[string]string{"src/sanitize.rs": "pub fn sanitize_header_value(v: &str) -> String {\n v.replace(['\\r', '\\n'], \"\")\n}"})
 	if r := Match([]*Set{s}, fixed, seen); r.Status != Contains {
