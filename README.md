@@ -89,6 +89,42 @@ crates.io. Version ordering uses
 the implementation used by Google's OSV tooling, so Maven `2.2.0` equals
 `2.2.0.RELEASE` and `3.35.0.CR1` sorts before `3.35.0`.
 
+## GitHub Action
+
+Check the advisory files changed in a pull request:
+
+```yaml
+name: isitfixed
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Slymaster/isitfixed@v0.2.0
+```
+
+Findings appear as annotations on the files and as a table in the job
+summary. The action builds isitfixed from source with Go, which takes about
+20–40 s on the first run (later runs use the Go cache).
+It runs `actions/setup-go`, so later steps in the same job use isitfixed's Go
+version unless they set up Go again.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `files` | changed files | Space- or newline-separated OSV JSON files. When empty on `pull_request` or `pull_request_target`, the `.json` files added or modified by the pull request; otherwise nothing is checked. |
+| `args` | | Extra `isitfixed check` arguments, e.g. `--min-severity warning` or `--checks IF001,IF002`. |
+| `github-token` | `${{ github.token }}` | Token for GitHub API calls. |
+| `fail-on-error` | `true` | Fail the step on error findings. Exit status 2 (could not check) always fails it. |
+
+| Output | Meaning |
+|---|---|
+| `errors` | Number of error findings. |
+| `warnings` | Number of warning findings. |
+| `exit-code` | isitfixed's [exit status](#exit-status). |
+
 ## Checks
 
 Check IDs use an `IF` prefix so they are not confused with osv-linter's rule
@@ -229,8 +265,6 @@ reports each of them. Corrections were submitted upstream:
 
 ## Roadmap
 
-- A GitHub Action that runs isitfixed on changed advisory files in a pull
-  request.
 - More ecosystems (PyPI, RubyGems, NuGet, Packagist).
 - GitLab and Bitbucket fix references.
 - Automatic fix-commit discovery when an advisory references none.

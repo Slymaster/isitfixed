@@ -1,0 +1,51 @@
+name: Action
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Advisory with an error finding
+        id: error
+        uses: ./
+        continue-on-error: true
+        with:
+          files: testdata/advisories/GHSA-2r2v-q399-qq93.json
+      - name: Expect failure with errors
+        env:
+          OUTCOME: ${{ steps.error.outcome }}
+          ERRORS: ${{ steps.error.outputs.errors }}
+          EXIT_CODE: ${{ steps.error.outputs.exit-code }}
+        run: |
+          echo "outcome=$OUTCOME errors=$ERRORS exit-code=$EXIT_CODE"
+          test "$OUTCOME" = failure && test "$ERRORS" -ge 1 && test "$EXIT_CODE" = 1
+
+      - name: Same advisory with fail-on-error false
+        id: no-fail
+        uses: ./
+        with:
+          files: testdata/advisories/GHSA-2r2v-q399-qq93.json
+          fail-on-error: false
+      - name: Expect errors reported
+        env:
+          ERRORS: ${{ steps.no-fail.outputs.errors }}
+        run: test "$ERRORS" -ge 1
+
+      - name: Advisory with warnings only
+        id: warnings
+        uses: ./
+        with:
+          files: testdata/advisories/GHSA-pg5p-wwp8-97g8.json
+      - name: Expect warnings and no errors
+        env:
+          ERRORS: ${{ steps.warnings.outputs.errors }}
+          WARNINGS: ${{ steps.warnings.outputs.warnings }}
+        run: test "$ERRORS" = 0 && test "$WARNINGS" -ge 1

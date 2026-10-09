@@ -1,0 +1,62 @@
+name: isitfixed
+description: Check OSV / GitHub security advisory files for version ranges that do not match what was published.
+author: Slymaster
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  files:
+    description: >-
+      Space- or newline-separated OSV JSON files to check. When empty on a
+      pull_request or pull_request_target event, the .json files added or
+      modified by the pull request are checked.
+    required: false
+    default: ""
+  args:
+    description: Extra arguments for `isitfixed check`, e.g. `--min-severity warning` or `--checks IF001,IF002`.
+    required: false
+    default: ""
+  github-token:
+    description: Token for GitHub API calls (fix commit lookups).
+    required: false
+    default: ${{ github.token }}
+  fail-on-error:
+    description: Fail the step when there are error findings. Exit status 2 (could not check) always fails.
+    required: false
+    default: "true"
+
+outputs:
+  errors:
+    description: Number of error findings.
+    value: ${{ steps.check.outputs.errors }}
+  warnings:
+    description: Number of warning findings.
+    value: ${{ steps.check.outputs.warnings }}
+  exit-code:
+    description: Exit status of isitfixed (0 ok, 1 error findings, 2 could not check).
+    value: ${{ steps.check.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: ${{ github.action_path }}/go.mod
+        cache-dependency-path: ${{ github.action_path }}/go.sum
+
+    - name: Build isitfixed
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: go build -o "$RUNNER_TEMP/isitfixed" ./cmd/isitfixed
+
+    - name: Check advisories
+      id: check
+      shell: bash
+      env:
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: bash "$GITHUB_ACTION_PATH/action/check.sh"
