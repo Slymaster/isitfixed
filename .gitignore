@@ -1,0 +1,5 @@
+/isitfixed
+/dist/
+*.test
+*.out
+.playwright-mcp/

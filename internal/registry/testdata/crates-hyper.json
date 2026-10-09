@@ -1,0 +1,22 @@
+{
+ "versions": [
+  {
+   "num": "0.14.28",
+   "created_at": "2023-12-18T14:48:48.909522Z",
+   "yanked": false,
+   "checksum": "bf96e135eb83a2a8ddf766e426a841d8ddd7449d5f00d34ea02b41d2f19eef80"
+  },
+  {
+   "num": "1.0.0",
+   "created_at": "2023-11-15T17:48:09.453030Z",
+   "yanked": false,
+   "checksum": "24590385be94998c5def4cf53d34edc5381144c805126f00efb954d986f9a7b2"
+  },
+  {
+   "num": "0.14.27",
+   "created_at": "2023-06-26T16:10:05.439987Z",
+   "yanked": false,
+   "checksum": "ffb1cfd654a8219eaef89881fdb3bb3b1cdc5fa75ded05d6933b2b382e395468"
+  }
+ ]
+}
