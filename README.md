@@ -8,6 +8,14 @@ go install github.com/Slymaster/isitfixed/cmd/isitfixed@latest
 isitfixed check GHSA-pg5p-wwp8-97g8
 ```
 
+The `go install` line works once the repository is public at
+github.com/Slymaster/isitfixed. Until then, build from a clone with
+`go build ./cmd/isitfixed`. Building needs Go 1.26.3 or newer: `go.mod` says
+`go 1.26.3` because the version-comparison dependency,
+`github.com/google/osv-scalibr` v0.5.3, declares that minimum. With an older Go
+1.21+ toolchain, `go` downloads a newer one automatically unless
+`GOTOOLCHAIN=local` is set.
+
 ## Why
 
 Advisory ranges are written by hand, and mistakes in them are hard to spot:
@@ -18,19 +26,19 @@ hides a vulnerable version or flags a fixed one.
 
 [`osv-linter`](https://github.com/ossf/osv-schema/tree/main/tools/osv-linter)
 validates OSV records and checks that the packages and versions they name
-exist. isitfixed overlaps with it on those two points (PKG001, VER001) and is
+exist. isitfixed overlaps with it on those two points (IF001, IF002) and is
 meant to be complementary. What it adds:
 
-- **Content-based fix verification (FIX001).** It takes the fix commits or pull
+- **Content-based fix verification (IF005).** It takes the fix commits or pull
   requests referenced by the advisory, extracts the lines the fix adds and
   removes, downloads the published artifacts (Go module zip, npm tarball,
   crate, Maven `-sources.jar`) and checks whether those lines are present. This
   answers "does 3.34.7 contain the fix?" directly, even when the fix reached
   3.34.7 through a backport commit that `git tag --contains` would not find.
-- **Range-shape checks (RNG001, RNG002)** for stale `last_affected` events and
+- **Range-shape checks (IF003, IF004)** for stale `last_affected` events and
   release lines that no range covers, confirmed by content when a fix commit
   is available.
-- **Cross-database comparison (XDB001)** against alias records on osv.dev
+- **Cross-database comparison (IF006)** against alias records on osv.dev
   (Go vulndb `GO-*`, RustSec, …).
 
 ## Usage
@@ -44,17 +52,31 @@ isitfixed check --dir advisories/ --ecosystem Go --concurrency 4
 | Flag | Meaning |
 |---|---|
 | `--format text\|json` | Output format (default `text`). |
-| `--ecosystem` | Only check advisories with a package in `Go`, `npm`, `Maven` or `crates.io`. |
+| `--ecosystem` | Only check advisories with a package in `Go`, `npm`, `Maven` or `crates.io` (case-insensitive). |
 | `--concurrency` | Advisories checked in parallel (default 4). Requests are also limited per host. |
-| `--fix-ref URL` | Extra fix commit or pull request URL for FIX001 (repeatable). It applies to every advisory in the run, so use it when checking a single advisory that does not reference its fix. |
-| `--checks` | Comma-separated check IDs to run (default: all). |
+| `--fix-ref URL` | Extra fix commit or pull request URL for IF005 (repeatable). It applies to every advisory in the run, so use it when checking a single advisory that does not reference its fix. |
+| `--checks` | Comma-separated check IDs or slugs to run, e.g. `IF004` or `uncovered-release-line` (default: all). |
 | `--min-severity` | Hide findings below `info`, `warning` or `error`. |
-| `--max-artifacts` | Artifacts inspected per package by FIX001 (default 24). |
+| `--max-artifacts` | Artifacts inspected per package by IF005 (default 24). |
 | `--cache-dir`, `--no-cache` | On-disk cache location (default `<user cache dir>/isitfixed`) or no cache. |
 | `-v` | Text output: also list advisories without findings. |
 
-The exit code is `1` when any finding has severity `error`, so the command can
-gate a CI job; `2` means a usage or runtime error.
+### Exit status
+
+| Status | Meaning |
+|---|---|
+| `0` | Every advisory was checked and no finding has severity `error` (warnings and info may be present). |
+| `1` | At least one finding has severity `error`, and every check completed. |
+| `2` | Usage error, or a runtime failure prevented a check from completing: an input file that cannot be read or is not valid JSON, an advisory ID not found on osv.dev, a `--dir` with no checkable OSV record, or a registry, GitHub or osv.dev request that still failed after retries. |
+
+`2` takes precedence over `1`. A failed lookup is never turned into a lower
+severity or a pass. It is reported as its own `FAILED` result that starts with
+"could not check" and names the host that failed (for Maven, the first
+repository that failed, normally Maven Central). `--min-severity` never hides
+these results. In `--dir` scans, files that are not OSV records or not valid
+JSON are skipped and counted on stderr. Advisories that are withdrawn,
+describe malicious packages, or only name packages in unsupported ecosystems
+are listed as `skipped` and do not change the exit status.
 
 GitHub API calls (fix commits, pull requests, tags) use `GITHUB_TOKEN`, or the
 output of `gh auth token` when the GitHub CLI is installed. Without a token the
@@ -69,16 +91,20 @@ the implementation used by Google's OSV tooling, so Maven `2.2.0` equals
 
 ## Checks
 
-| ID | Severity | What it reports |
-|---|---|---|
-| PKG001 | error | The package does not exist in the registry. Suggests a similarly named package from the same advisory. |
-| VER001 | error for `fixed`, warning for `introduced` (other than 0) and `last_affected` | A range version is not published. A version counts as published when a listed version is equal under ecosystem ordering, or a per-version lookup finds it (Go pseudo-versions, incomplete `maven-metadata.xml`). For Go it also reports when the version exists under another major-version module path (`github.com/x/y/v2`), and downgrades to info when the version is only a git tag that cannot be a module version (applications at v2+ without a `/v2` path). |
-| RNG001 | warning (info when weak) | A range ends with `last_affected: X`, later versions of the same release line were published, no range covers them, and there is no `fixed` event. It is a warning when newer lines of the package have fixed versions (the line looks unpatched), info otherwise. Fix content can confirm it (the newest version still has the removed code) or downgrade it (the newest version contains the fix). |
-| RNG002 | warning (info when ranges start mid-line) | A whole release line lies between two ranges and none of its versions is covered, for example Quarkus 3.28/3.29 between `[3.21.0, 3.27.3.1)` and `[3.30.0, …)`. Partially covered lines are not reported. Lines first published after the preceding fix are skipped, and the finding is info only when some range is introduced at a patch release (the vulnerable code may have arrived through a backport). Fix content can confirm or downgrade it. |
-| FIX001 | error / warning / info | Fix-content verification, see below. **error**: the `fixed` version does not contain the fix while another version does. **warning**: the range includes versions that already contain the fix (with the earliest such version, found by bisection, and a suggested split of the range). **info**: verified results, pre-releases of the fixed release that already contain the fix, and "unverifiable" when the fix commit is missing, yields no usable lines, or matches nothing in any inspected artifact. |
-| XDB001 | warning | An alias record on osv.dev marks a different set of published versions affected for the same package, or lists a similarly named package that this advisory spells differently. |
+Check IDs use an `IF` prefix so they are not confused with osv-linter's rule
+IDs, which mean different things. Each ID has a slug, shown in text output and
+in the JSON `slug` field.
 
-### How FIX001 works
+| ID | Slug | Severity | What it reports |
+|---|---|---|---|
+| IF001 | `package-missing` | error | The package does not exist in the registry. Suggests a similarly named package from the same advisory. |
+| IF002 | `version-missing` | error for `fixed`, warning for `introduced` (other than 0) and `last_affected` | A range version is not published. A version counts as published when a listed version is equal under ecosystem ordering, or a per-version lookup finds it (Go pseudo-versions, incomplete `maven-metadata.xml`). For Go it also reports when the version exists under another major-version module path (`github.com/x/y/v2`), and downgrades to info when the version is only a git tag that cannot be a module version (applications at v2+ without a `/v2` path). An unpublished `fixed` version is a warning instead of an error when its range matches no published version at all. |
+| IF003 | `stale-last-affected` | warning (info when weak) | A range ends with `last_affected: X`, later versions of the same release line were published, no range covers them, and there is no `fixed` event. It is a warning when newer lines of the package have fixed versions (the line looks unpatched), info otherwise. Fix content can confirm it (the newest version still has the removed code) or downgrade it (the newest version contains the fix). |
+| IF004 | `uncovered-release-line` | warning (info when ranges start mid-line) | A whole release line lies between two ranges and none of its versions is covered, for example Quarkus 3.28/3.29 between `[3.21.0, 3.27.3.1)` and `[3.30.0, …)`. Partially covered lines are not reported. Lines first published after the preceding fix are skipped, and the finding is info only when some range is introduced at a patch release (the vulnerable code may have arrived through a backport). Fix content can confirm or downgrade it. |
+| IF005 | `fix-content` | error / warning / info | Fix-content verification, see below. **error**: the `fixed` version does not contain the fix while another version does. **warning**: the range includes versions that already contain the fix (with the earliest such version, found by bisection, and a suggested split of the range). **info**: verified results, pre-releases of the fixed release that already contain the fix, "inconclusive" when versions match only partly, and "unverifiable" when no fix commit is referenced, it cannot be fetched (e.g. HTTP 422 for an unknown commit), it has no usable lines, or its files are in none of the inspected artifacts. |
+| IF006 | `cross-database` | warning | An alias record on osv.dev marks a different set of published versions affected for the same package, or lists a similarly named package that this advisory spells differently. |
+
+### How IF005 works
 
 1. Collect GitHub commit and pull request URLs from the advisory's `FIX`/`WEB`
    references, from `FIX` references of alias records (Go vulndb records often
@@ -115,19 +141,27 @@ npm and crate tarballs are downloaded whole and their digest is verified.
 
 The advisory GHSA-rc95-pcm8-65v9 (original file from github/advisory-database,
 in `testdata/advisories/`) references no fix commit, so the upstream fix is
-passed with `--fix-ref`. Output as of 2026-10-08:
+passed with `--fix-ref`. Output as of 2026-10-09:
 
 ```
 $ isitfixed check --file testdata/advisories/GHSA-rc95-pcm8-65v9.json \
     --fix-ref https://github.com/quarkusio/quarkus/commit/363d53a82a16b2b7c9de8d968694fd4d93e05062
 GHSA-rc95-pcm8-65v9  Quarkus has Authentication/Authorization bypasses
   source: testdata/advisories/GHSA-rc95-pcm8-65v9.json
-  ERROR   VER001  Maven io.quarkus:quarkus-vertx-http
+  ERROR   IF002 version-missing  Maven io.quarkus:quarkus-vertx-http
           fixed version 3.35.1.1 is not published for io.quarkus:quarkus-vertx-http
           - nearest published versions: 3.35.1 < 3.35.1.1 < 3.35.2
           evidence: https://repo1.maven.org/maven2/io/quarkus/quarkus-vertx-http/maven-metadata.xml
           evidence: https://repo1.maven.org/maven2/io/quarkus/quarkus-vertx-http/3.35.1.1/quarkus-vertx-http-3.35.1.1.pom
-  WARNING FIX001  Maven io.quarkus:quarkus-vertx-http
+  WARNING IF004 uncovered-release-line  Maven io.quarkus:quarkus-vertx-http
+          release line(s) 3.28, 3.29 (13 versions: 3.28.0.CR1, 3.28.0 … 3.29.4) lie between affected ranges (after the range ending at 3.27.3.1, before the one introduced at 3.30.0) and no version of them is covered
+          - a line released before the preceding fix and never patched is still vulnerable; if these versions are affected, add a range for them
+          - confirmed by content: 3.29.4 lacks the fix (0/11 distinctive lines in their fixed state) and still contains 1/1 lines the fix removed
+          evidence: https://repo1.maven.org/maven2/io/quarkus/quarkus-vertx-http/maven-metadata.xml
+          evidence: https://repo1.maven.org/maven2/io/quarkus/quarkus-vertx-http/3.29.4/quarkus-vertx-http-3.29.4-sources.jar (sha1:be42a8404d69526c488129c32df6c34f2ed0164b, as published by the registry)
+          suggested ranges:
+            {"type":"ECOSYSTEM","events":[{"introduced":"3.28.0.CR1"},{"last_affected":"3.29.4"}]}
+  WARNING IF005 fix-content  Maven io.quarkus:quarkus-vertx-http
           range [3.34.0, 3.35.1.1) includes versions that already contain the fix
           - 3.34.x: the fix first appears in 3.34.7 (newest affected version checked: 3.34.7: contains (11/11 distinctive lines present))
           - fixed version 3.35.1.1 is not published; the earliest later 3.35.x version containing the fix is 3.35.2
@@ -136,15 +170,7 @@ GHSA-rc95-pcm8-65v9  Quarkus has Authentication/Authorization bypasses
           suggested ranges:
             {"type":"ECOSYSTEM","events":[{"introduced":"3.34.0"},{"fixed":"3.34.7"}]}
             {"type":"ECOSYSTEM","events":[{"introduced":"3.35.0.CR1"},{"fixed":"3.35.2"}]}
-  WARNING RNG002  Maven io.quarkus:quarkus-vertx-http
-          release line(s) 3.28, 3.29 (13 versions: 3.28.0.CR1, 3.28.0 … 3.29.4) lie between affected ranges (after the range ending at 3.27.3.1, before the one introduced at 3.30.0) and no version of them is covered
-          - a line released before the preceding fix and never patched is still vulnerable; if these versions are affected, add a range for them
-          - confirmed by content: 3.29.4 lacks the fix (0/11 distinctive lines in their fixed state) and still contains 1/1 lines the fix removed
-          evidence: https://repo1.maven.org/maven2/io/quarkus/quarkus-vertx-http/maven-metadata.xml
-          evidence: https://repo1.maven.org/maven2/io/quarkus/quarkus-vertx-http/3.29.4/quarkus-vertx-http-3.29.4-sources.jar (sha1:be42a8404d69526c488129c32df6c34f2ed0164b, as published by the registry)
-          suggested ranges:
-            {"type":"ECOSYSTEM","events":[{"introduced":"3.28.0.CR1"},{"last_affected":"3.29.4"}]}
-  INFO    FIX001  Maven io.quarkus:quarkus-vertx-http
+  INFO    IF005 fix-content  Maven io.quarkus:quarkus-vertx-http
           fix content checked against published artifacts
           - 3.20.6.1: contains (11/11 distinctive lines present)
           - 3.20.6: lacks (0/11 distinctive lines present)
@@ -161,7 +187,7 @@ GHSA-rc95-pcm8-65v9  Quarkus has Authentication/Authorization bypasses
           - 3.35.1: lacks (0/11 distinctive lines present)
           evidence: https://github.com/quarkusio/quarkus/commit/363d53a82a16b2b7c9de8d968694fd4d93e05062
 
-1 advisories checked: 1 errors, 2 warnings, 1 info
+1 advisory checked: 1 errors, 2 warnings, 1 info
 ```
 
 ## Real-world findings
@@ -172,18 +198,18 @@ reports each of them. Corrections were submitted upstream:
 
 | Advisory | Problem | isitfixed | Submitted |
 |---|---|---|---|
-| [GHSA-w7c2-w76w-5hmj](https://github.com/advisories/GHSA-w7c2-w76w-5hmj) | The Cilium 1.18 range is attached to the misspelled module `github.com/cilium/ciliumCilium` (proxy.golang.org returns 404), so 1.18.0–1.18.10 of `github.com/cilium/cilium` are not marked affected. | PKG001 error; XDB001 against GO-2026-6596; RNG002 shows by content that the fix first appears in 1.18.11 | [#10239](https://github.com/github/advisory-database/pull/10239) |
-| [GHSA-pg5p-wwp8-97g8](https://github.com/advisories/GHSA-pg5p-wwp8-97g8) | `last_affected: 1.10.0`, but 1.10.1–1.10.20 were published later and are unfixed: the fix (cilium/cilium@f490339) only reached 1.11.16+, and v1.10.20 still logs header values in `pkg/envoy/server.go`. | RNG001 warning listing 1.10.1 … 1.10.20; with `--fix-ref` it confirms 1.10.20 still contains the removed log line | [#10240](https://github.com/github/advisory-database/pull/10240) |
-| [GHSA-2r2v-q399-qq93](https://github.com/advisories/GHSA-2r2v-q399-qq93) | Maven `fixed: 2.2.10.RELEASE0.5` does not exist; the fix shipped in 2.2.10.RELEASE. | VER001 error | [#10241](https://github.com/github/advisory-database/pull/10241) |
-| [GHSA-rc95-pcm8-65v9](https://github.com/advisories/GHSA-rc95-pcm8-65v9) | `fixed: 3.35.1.1` does not exist; 3.34.7 already contains the backported fix but is inside a range; the 3.28.x and 3.29.x lines are vulnerable but not covered. | VER001 error; FIX001 warning (fix first appears in 3.34.7 and 3.35.2, with a suggested split); RNG002 warning for 3.28/3.29 confirmed by content | [#10242](https://github.com/github/advisory-database/pull/10242) |
+| [GHSA-w7c2-w76w-5hmj](https://github.com/advisories/GHSA-w7c2-w76w-5hmj) | The Cilium 1.18 range is attached to the misspelled module `github.com/cilium/ciliumCilium` (proxy.golang.org returns 404), so 1.18.0–1.18.10 of `github.com/cilium/cilium` are not marked affected. | IF001 error; IF006 against GO-2026-6596; IF004 shows by content that the fix first appears in 1.18.11 | [#10239](https://github.com/github/advisory-database/pull/10239) |
+| [GHSA-pg5p-wwp8-97g8](https://github.com/advisories/GHSA-pg5p-wwp8-97g8) | `last_affected: 1.10.0`, but 1.10.1–1.10.20 were published later and are unfixed: the fix (cilium/cilium@f490339) only reached 1.11.16+, and v1.10.20 still logs header values in `pkg/envoy/server.go`. | IF003 warning listing 1.10.1 … 1.10.20; with `--fix-ref` it confirms 1.10.20 still contains the removed log line | [#10240](https://github.com/github/advisory-database/pull/10240) |
+| [GHSA-2r2v-q399-qq93](https://github.com/advisories/GHSA-2r2v-q399-qq93) | Maven `fixed: 2.2.10.RELEASE0.5` does not exist; the fix shipped in 2.2.10.RELEASE. | IF002 error | [#10241](https://github.com/github/advisory-database/pull/10241) |
+| [GHSA-rc95-pcm8-65v9](https://github.com/advisories/GHSA-rc95-pcm8-65v9) | `fixed: 3.35.1.1` does not exist; 3.34.7 already contains the backported fix but is inside a range; the 3.28.x and 3.29.x lines are vulnerable but not covered. | IF002 error; IF005 warning (fix first appears in 3.34.7 and 3.35.2, with a suggested split); IF004 warning for 3.28/3.29 confirmed by content | [#10242](https://github.com/github/advisory-database/pull/10242) |
 
 ## Limitations
 
 - **Content matching needs source in the artifact.** npm packages that only
   ship transpiled or bundled code, and Maven artifacts without
-  `-sources.jar`, often cannot be matched; FIX001 then says "unverifiable"
+  `-sources.jar`, often cannot be matched; IF005 then says "unverifiable"
   rather than guessing. The class-file fallback is lower confidence.
-- **FIX001 needs a fix reference on GitHub.** Many advisories link only to
+- **IF005 needs a fix reference on GitHub.** Many advisories link only to
   vendor pages; `--fix-ref` covers single advisories. GitLab and other forges
   are not supported yet.
 - **Partial fixes.** When a fix spans several modules and the advisory names
@@ -192,11 +218,11 @@ reports each of them. Corrections were submitted upstream:
 - **Absence of the fix is not proof of vulnerability.** For a purely additive
   fix, a version without the added lines may also never have had the
   vulnerable code. isitfixed says so instead of confirming the finding.
-- **Heuristics.** RNG001/RNG002 encode common advisory-writing patterns
+- **Heuristics.** IF003/IF004 encode common advisory-writing patterns
   (per-line ranges, mid-line introductions); they can be wrong for projects
   with unusual release histories. Treat warnings as leads to verify by hand.
 - **Go module paths.** Repositories that moved (for example `lxc/lxd` →
-  `canonical/lxd`) can make VER001 report versions that exist only as tags of
+  `canonical/lxd`) can make IF002 report versions that exist only as tags of
   the new repository.
 - Release lines are `major.minor`, which does not fit every project's
   versioning.
